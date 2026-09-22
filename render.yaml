@@ -18,7 +18,7 @@ services:
       - key: INFERENCE_TIME_BUDGET_S
         value: "3.5"
       - key: MAX_GRAINS_PER_IMAGE
-        value: "400"
+        value: "120"
       # Цены пшеницы, тенге за тонну — правятся без пересборки
       - key: PRICE_CLASS_3_KZT
         value: "102000"
