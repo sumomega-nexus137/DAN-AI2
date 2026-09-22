@@ -242,7 +242,7 @@ async def chat(req: ChatRequest) -> dict:
             model.generate_content,
             _consultant_prompt(req.message, req.context),
             safety_settings=safety,
-            generation_config={"temperature": 0.4, "max_output_tokens": 600},
+            generation_config={"temperature": 0.4, "max_output_tokens": 300},
             request_options={"timeout": 45},
         )
         reply = (getattr(result, "text", "") or "").strip()

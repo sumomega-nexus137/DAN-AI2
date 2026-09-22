@@ -22,21 +22,16 @@ def _decode_image(image_bytes: bytes) -> np.ndarray:
     return image
 
 
-def _downscale_if_huge(image: np.ndarray, max_side: int = 1024) -> np.ndarray:
-    h, w = image.shape[:2]
-    scale = max_side / max(h, w)
-    if scale >= 1.0:
-        return image
-    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-
 def analyze(image_bytes: bytes) -> dict:
     started = time.perf_counter()
 
     if config.DEMO_MODE:
         ranked = DEMO_TOP
     else:
-        image = _downscale_if_huge(_decode_image(image_bytes))
+        # Промежуточный downscale не нужен: эмбеддер всё равно ресайзит вход в
+        # 224x224 одним INTER_AREA-проходом. Отдаём декодированный кадр напрямую —
+        # экономим один ресайз большого фото.
+        image = _decode_image(image_bytes)
         head = heads.disease_head()
         embeddings = embedder.embed_images([image])
         probs = head.predict_proba(embeddings)[0]

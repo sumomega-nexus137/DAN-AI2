@@ -151,7 +151,9 @@ SAFETY = [
         "HARM_CATEGORY_DANGEROUS_CONTENT",
     )
 ]
-GEN_CONFIG = {"temperature": 0.4, "max_output_tokens": 600}
+# 300 токенов хватает на ответ до 6 предложений, а генерация вдвое короче,
+# чем при 600 — заметно быстрее отклик на голосовое.
+GEN_CONFIG = {"temperature": 0.4, "max_output_tokens": 300}
 GEMINI_TIMEOUT_S = 45
 
 
