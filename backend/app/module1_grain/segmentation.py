@@ -106,21 +106,28 @@ def segment_grains(
 
     labels = _binarize_and_segment(image_bgr, min_area_px, max_area_px, min_distance_px)
 
+    # Площадь и bbox каждой метки считаем ЗА ОДИН проход по изображению, а не
+    # сканом (labels == label) на каждую метку: на «капец разбитом» зерне меток
+    # тысячи, и старый цикл был O(меток × пикселей) — секунды на ровном месте.
+    # bincount даёт площади всех меток сразу, find_objects — их bounding-box'ы.
+    areas = np.bincount(labels.ravel())
+    objects = ndi.find_objects(labels)  # objects[label-1] = (slice_y, slice_x) или None
+
     crops: list[GrainCrop] = []
-    for label in np.unique(labels):
-        if label == 0:
+    for label in range(1, len(objects) + 1):
+        obj = objects[label - 1]
+        if obj is None:
             continue
-        component_mask = (labels == label)
-        area = int(component_mask.sum())
+        area = int(areas[label]) if label < areas.size else 0
         if area < min_area_px or area > max_area_px:
             continue
 
-        ys, xs = np.where(component_mask)
-        x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad)
-        y0, y1 = max(0, ys.min() - pad), min(h, ys.max() + pad)
+        sl_y, sl_x = obj
+        x0, x1 = max(0, sl_x.start - pad), min(w, sl_x.stop - 1 + pad)
+        y0, y1 = max(0, sl_y.start - pad), min(h, sl_y.stop - 1 + pad)
 
         crop = image_bgr[y0:y1, x0:x1].copy()
-        cx, cy = float(xs.mean()), float(ys.mean())
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         crops.append(GrainCrop(image=crop, bbox=(x0, y0, x1 - x0, y1 - y0), area_px=area, centroid=(cx, cy)))
 
     return crops

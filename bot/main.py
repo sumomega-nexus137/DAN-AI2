@@ -94,7 +94,12 @@ async def _analyze_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         )
         return
     text = format_disease(data) if module == "disease" else format_grain(data)
-    await status.edit_text(text, parse_mode="HTML")
+    parts = _split_for_telegram(text)
+    # первую часть кладём в статус-сообщение, остальные (если ответ длинный) —
+    # отдельными сообщениями, чтобы не упереться в лимит Telegram
+    await status.edit_text(parts[0], parse_mode="HTML")
+    for extra in parts[1:]:
+        await update.message.reply_text(extra, parse_mode="HTML")
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,10 +117,14 @@ async def on_document_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 VOICE_PROMPT = (
     "Это аудио — вопрос фермера, на казахском ИЛИ на русском языке. "
     "Сначала внимательно распознай сказанное (учти казахскую речь), затем "
-    "ответь на том же языке, на котором был вопрос: коротко и по делу, "
-    "до 6 предложений, как агроном-консультант из Казахстана. "
-    "Если вопрос про качество зерна или болезни растений — добавь, что можно "
-    "прислать фото боту для точной оценки. Отвечай обычным текстом, без markdown."
+    "ответь СТРОГО на том же языке, на котором был задан вопрос, как опытный "
+    "агроном-консультант из Казахстана. Отвечай развёрнуто и подробно: объясни "
+    "причины, разбей ответ на понятные пункты или абзацы, дай конкретные "
+    "практические шаги, сроки и ориентиры по деньгам за тонну, где это уместно. "
+    "Не выдумывай точные дозировки препаратов — советуй уточнить их у агронома "
+    "по регламенту применения. Если вопрос про качество зерна или болезни "
+    "растений — добавь, что можно прислать фото боту для точной оценки. "
+    "Отвечай обычным текстом, без markdown."
 )
 
 
@@ -151,10 +160,38 @@ SAFETY = [
         "HARM_CATEGORY_DANGEROUS_CONTENT",
     )
 ]
-# 300 токенов хватает на ответ до 6 предложений, а генерация вдвое короче,
-# чем при 600 — заметно быстрее отклик на голосовое.
-GEN_CONFIG = {"temperature": 0.4, "max_output_tokens": 300}
+# 2048 токенов — развёрнутый ответ помещается целиком и не обрывается. У
+# gemini-2.5-flash часть бюджета уходит на внутренний "thinking", поэтому
+# маленький лимит давал пустые ("не расслышал") и обрезанные ответы.
+GEN_CONFIG = {"temperature": 0.4, "max_output_tokens": 2048}
 GEMINI_TIMEOUT_S = 45
+
+# Telegram не принимает сообщения длиннее 4096 символов — длинный ответ иначе
+# просто не отправляется («сообщение потерялось»). Режем на части по границам
+# строк с запасом.
+TG_MAX_CHARS = 3800
+
+
+def _split_for_telegram(text: str) -> list[str]:
+    chunks: list[str] = []
+    rest = text.strip()
+    while len(rest) > TG_MAX_CHARS:
+        cut = rest.rfind("\n", 0, TG_MAX_CHARS)
+        if cut <= 0:
+            cut = rest.rfind(" ", 0, TG_MAX_CHARS)
+        if cut <= 0:
+            cut = TG_MAX_CHARS
+        chunks.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        chunks.append(rest)
+    return chunks or [""]
+
+
+async def _reply_long(message, text: str, parse_mode: str | None = None) -> None:
+    """Отправляет ответ, разбивая на части, если он длиннее лимита Telegram."""
+    for part in _split_for_telegram(text):
+        await message.reply_text(part, parse_mode=parse_mode)
 
 
 async def _voice_reply(mime_type: str, audio_bytes: bytes) -> str:
@@ -202,7 +239,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     reply = await _voice_reply(voice.mime_type or "audio/ogg", audio_bytes)
     if reply:
-        await update.message.reply_text(reply)
+        await _reply_long(update.message, reply)
     else:
         await update.message.reply_text(
             "Не расслышал вопрос. Запишите ещё раз чуть длиннее и ближе к "

@@ -101,7 +101,10 @@ async def health() -> dict:
 async def predict_grain(file: UploadFile = File(...)) -> dict:
     data = await _read_image(file)
     try:
-        return grain_pipeline.analyze(data)
+        # analyze() — синхронный и тяжёлый (сегментация + DINOv2). Выносим в
+        # поток, иначе он блокирует event loop и ВЕСЬ сайт (консультант,
+        # другие запросы) висит, пока идёт разбор фото.
+        return await asyncio.to_thread(grain_pipeline.analyze, data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -113,7 +116,7 @@ async def predict_grain(file: UploadFile = File(...)) -> dict:
 async def predict_disease(file: UploadFile = File(...)) -> dict:
     data = await _read_image(file)
     try:
-        return disease_pipeline.analyze(data)
+        return await asyncio.to_thread(disease_pipeline.analyze, data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -136,36 +139,42 @@ _UNRECOGNIZED = {
 }
 
 
+def _auto_analyze(data: bytes) -> dict:
+    """Синхронная тяжёлая часть авто-разбора: детект модуля + нужный пайплайн.
+    Вызывается через asyncio.to_thread, чтобы не блокировать event loop."""
+    arr = np.frombuffer(data, np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Не удалось прочитать изображение")
+
+    module = router.detect_module(image)
+
+    if module == "grain":
+        result = grain_pipeline.analyze(data)
+        if not result.get("total_grains"):
+            return dict(_UNRECOGNIZED)
+        result["detected_module"] = "grain"
+        return result
+
+    if module in ("disease", "maybe_plant"):
+        result = disease_pipeline.analyze(data)
+        conf = (result.get("diagnosis") or {}).get("confidence", 0.0)
+        # для «сомнительного» объекта требуем уверенность выше порога
+        if module == "maybe_plant" and conf < _DISEASE_ACCEPT_CONF:
+            return dict(_UNRECOGNIZED)
+        result["detected_module"] = "disease"
+        return result
+
+    return dict(_UNRECOGNIZED)
+
+
 @app.post("/predict/auto")
 async def predict_auto(file: UploadFile = File(...)) -> dict:
     """Сам определяет, что на фото (зерно / растение / не наше), и запускает
     нужный модуль. Постороннее фото не выдаётся за диагноз."""
     data = await _read_image(file)
     try:
-        arr = np.frombuffer(data, np.uint8)
-        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("Не удалось прочитать изображение")
-
-        module = router.detect_module(image)
-
-        if module == "grain":
-            result = grain_pipeline.analyze(data)
-            if not result.get("total_grains"):
-                return dict(_UNRECOGNIZED)
-            result["detected_module"] = "grain"
-            return result
-
-        if module in ("disease", "maybe_plant"):
-            result = disease_pipeline.analyze(data)
-            conf = (result.get("diagnosis") or {}).get("confidence", 0.0)
-            # для «сомнительного» объекта требуем уверенность выше порога
-            if module == "maybe_plant" and conf < _DISEASE_ACCEPT_CONF:
-                return dict(_UNRECOGNIZED)
-            result["detected_module"] = "disease"
-            return result
-
-        return dict(_UNRECOGNIZED)
+        return await asyncio.to_thread(_auto_analyze, data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -184,10 +193,12 @@ def _consultant_prompt(message: str, context: dict | None) -> str:
         "Ты — советник по партии зерна в сервисе Dän-AI для фермеров Казахстана. "
         "Твоя задача — помочь решить, что делать с партией: чистить или продавать, "
         "как не потерять класс и деньги, чем обработать посев. "
-        "Отвечай по-русски, коротко и практично (до 6 предложений), простым языком, "
-        "без технического жаргона. Где уместно — говори о деньгах за тонну. "
-        "Не выдумывай точные дозировки препаратов — советуй уточнить их у "
-        "агронома по регламенту применения.",
+        "Отвечай на том же языке, на котором задан вопрос (русский или казахский). "
+        "Отвечай развёрнуто, подробно и структурно: разбей ответ на понятные "
+        "пункты или абзацы, объясни причины и дай конкретные практические шаги. "
+        "Пиши простым языком, без лишнего жаргона. Где уместно — говори о деньгах "
+        "за тонну и о сроках. Не выдумывай точные дозировки препаратов — советуй "
+        "уточнить их у агронома по регламенту применения.",
     ]
     if context:
         summary = []
@@ -242,7 +253,10 @@ async def chat(req: ChatRequest) -> dict:
             model.generate_content,
             _consultant_prompt(req.message, req.context),
             safety_settings=safety,
-            generation_config={"temperature": 0.4, "max_output_tokens": 300},
+            # 2048 токенов: развёрнутый ответ помещается целиком и не обрывается
+            # на полуслове (у gemini-2.5-flash часть бюджета уходит на "thinking",
+            # поэтому маленький лимит давал пустые/обрезанные ответы).
+            generation_config={"temperature": 0.4, "max_output_tokens": 2048},
             request_options={"timeout": 45},
         )
         reply = (getattr(result, "text", "") or "").strip()
