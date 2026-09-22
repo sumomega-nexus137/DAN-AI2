@@ -88,7 +88,7 @@ def embed_images(
     deadline = time.perf_counter() + time_budget_s if time_budget_s else None
 
     feats = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, len(images_bgr), batch_size):
             chunk = images_bgr[start : start + batch_size]
             batch = np.stack([_preprocess(img) for img in chunk])
