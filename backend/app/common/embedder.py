@@ -42,11 +42,20 @@ def _load_model():
     return _model
 
 
-def warmup() -> None:
+def warmup() -> np.ndarray:
     """Прогрев модели (вызывать на старте сервиса, чтобы первый настоящий
-    запрос пользователя не ждал загрузку весов)."""
-    if not config.DEMO_MODE:
-        _load_model()
+    запрос пользователя не ждал загрузку весов).
+
+    Кроме загрузки весов делает один фиктивный forward-проход: первый прогон
+    через torch дороже последующих (ленивая аллокация буферов, инициализация
+    ядер BLAS), поэтому «съедаем» его на старте, а не на первом фото
+    пользователя. Возвращает эмбеддинг фиктивного кадра [1, EMBED_DIM], чтобы
+    вызывающий код мог им же прогреть головы-классификаторы.
+    """
+    if config.DEMO_MODE:
+        return np.zeros((1, EMBED_DIM), dtype=np.float32)
+    dummy = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
+    return embed_images([dummy])
 
 
 def _preprocess(image_bgr: np.ndarray) -> np.ndarray:

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .common import config, embedder, router
+from .common import config, embedder, heads, router
 from .module1_grain import pipeline as grain_pipeline
 from .module2_disease import pipeline as disease_pipeline
 
@@ -42,10 +42,16 @@ async def _startup() -> None:
         logger.info("DEMO_MODE=1 — нейросеть не загружается, отдаются демо-ответы")
         return
     try:
-        embedder.warmup()
-        logger.info("DINOv2 загружен, сервис готов")
+        # warmup() грузит DINOv2 и делает фиктивный forward, возвращая эмбеддинг
+        # [1, EMBED_DIM]. Им же прогреваем обе головы (первый predict_proba
+        # sklearn тоже неявно инициализирует внутренние буферы), чтобы первый
+        # реальный запрос — по зерну или по листу — не платил за холодный старт.
+        dummy_emb = embedder.warmup()
+        heads.grain_head().predict_proba(dummy_emb)
+        heads.disease_head().predict_proba(dummy_emb)
+        logger.info("DINOv2 и головы прогреты, сервис готов")
     except Exception as exc:  # noqa: BLE001 — сервис должен подняться даже без весов
-        logger.warning("Не удалось прогреть DINOv2 на старте: %s", exc)
+        logger.warning("Не удалось прогреть модель на старте: %s", exc)
 
 
 async def _read_image(file: UploadFile) -> bytes:
