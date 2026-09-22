@@ -209,7 +209,13 @@ def _build_recommendations(
     thin = pct["shuploe_melkoe"]
     sprouted = pct["prorosshee"]
 
-    if potential_grade is not None and gain > 0 and (grade is None or potential_grade < grade):
+    # Очистка поднимает класс? (gain уже посчитан согласованно с этим условием)
+    can_upgrade = (
+        potential_grade is not None
+        and gain > 0
+        and (grade is None or potential_grade < grade)
+    )
+    if can_upgrade:
         recs.append(
             Recommendation(
                 title=f"Очистить партию — поднимете до {potential_grade} класса",
@@ -258,9 +264,17 @@ def _build_recommendations(
             )
         )
 
-    # Хорошая партия (товарный класс, чисто) — подтверждаем, чтобы фермер не
-    # чистил зря.
-    if grade is not None and grade <= 3 and foreign <= 2.0 and broken + thin <= 5.0 and sprouted <= 1.0:
+    # Хорошая партия (товарный класс, чисто, и очистка класс не поднимет) —
+    # подтверждаем, чтобы фермер не чистил зря. НЕ показываем вместе с советом
+    # «очистить и поднять класс», иначе совет противоречивый.
+    if (
+        not can_upgrade
+        and grade is not None
+        and grade <= 3
+        and foreign <= 2.0
+        and broken + thin <= 5.0
+        and sprouted <= 1.0
+    ):
         recs.append(
             Recommendation(
                 title="Партия в хорошем состоянии",
@@ -327,8 +341,13 @@ def assess(counts: dict[str, int]) -> GrainAssessment:
         else None
     )
 
+    # «Прибавку от очистки» показываем ТОЛЬКО когда очистка реально поднимает
+    # КЛАСС (иначе цена растёт лишь внутри той же вилки — это сбивает с толку:
+    # число есть, а совета «очистить» нет). Так gain > 0 всегда совпадает с
+    # рекомендацией поднять класс.
+    class_improves = potential_grade is not None and (grade is None or potential_grade < grade)
     gain = 0.0
-    if potential_price is not None and potential_price > price:
+    if class_improves and potential_price is not None and potential_price > price:
         gain = potential_price - price
 
     # Сколько партия теряет против товарного 3 класса — ориентир по деньгам

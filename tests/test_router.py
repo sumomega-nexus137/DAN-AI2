@@ -33,6 +33,23 @@ def _green_plant(size: int = 800) -> np.ndarray:
     return img
 
 
+def _grain_heap(size: int = 800, n: int = 400) -> np.ndarray:
+    """Насыпанная горкой проба: много мелких зёрен плотно к центру. Между
+    зёрнами есть тени/зазоры, поэтому одного доминирующего объекта нет."""
+    img = np.full((size, size, 3), 20, np.uint8)
+    rng = np.random.default_rng(1)
+    c = size // 2
+    for _ in range(n):
+        cx, cy = int(rng.normal(c, 120)), int(rng.normal(c, 120))
+        if 0 < cx < size and 0 < cy < size:
+            cv2.ellipse(
+                img, (cx, cy),
+                (int(rng.integers(9, 14)), int(rng.integers(6, 9))),
+                int(rng.integers(0, 180)), 0, 360, (45, 145, 195), -1,
+            )
+    return img
+
+
 def _mountain(size: int = 800) -> np.ndarray:
     """Один крупный тёплый объект (склон) на светлом небе."""
     img = np.full((size, size, 3), (180, 190, 200), np.uint8)
@@ -51,6 +68,11 @@ def _few_big_objects(size: int = 800) -> np.ndarray:
 
 def test_grain_scatter_is_grain():
     assert router.detect_module(_grain_scatter()) == "grain"
+
+
+def test_grain_heap_is_grain():
+    # насыпанная горкой проба тоже должна распознаваться как зерно
+    assert router.detect_module(_grain_heap()) == "grain"
 
 
 def test_green_plant_is_disease():
