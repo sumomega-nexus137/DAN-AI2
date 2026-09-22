@@ -10,27 +10,15 @@
 3. Число найденных зёрен сегментацией — у пробы их много.
 """
 
-import os
-
 import cv2
 import numpy as np
 
 from ..module1_grain.segmentation import segment_grains
 
-GREEN_FRACTION_MIN = float(os.environ.get("ROUTER_GREEN_MIN", 0.10))   # выше — растение
-BIG_OBJECT_FRACTION = float(os.environ.get("ROUTER_BIG_OBJECT", 0.22))  # один крупный объект = лист/чужое фото
-MIN_GRAINS = int(os.environ.get("ROUTER_MIN_GRAINS", 12))  # столько частиц — уже проба
-GRAIN_WARMTH_MIN = float(os.environ.get("ROUTER_WARMTH_MIN", 5.0))  # зерно тёплое (R > B)
-# Свободный потолок на размер частицы (страховка от совсем крупных сегментов).
-MAX_GRAIN_AREA_FRAC = float(os.environ.get("ROUTER_MAX_GRAIN_AREA_FRAC", 0.012))
-# ГЛАВНЫЙ признак: у пробы зерна нет ОДНОГО доминирующего связного объекта.
-# Даже насыпанная горкой проба распадается на отдельные зёрна (тени/зазоры между
-# ними), поэтому самый крупный связный кусок мал: россыпь ~0.001, плотная горка
-# ~0.05. А у горы (~0.33), листа (~0.44), предмета — один кусок занимает заметную
-# часть кадра. Порог 0.15 держит горку зерна и уверенно отсекает крупные объекты
-# (лист даёт такие же мелкие watershed-сегменты, что и зерно, — размер частиц их
-# не различает, а этот признак различает).
-GRAIN_MAX_BLOB_FRAC = float(os.environ.get("ROUTER_GRAIN_MAX_BLOB", 0.15))
+GREEN_FRACTION_MIN = 0.10   # выше — почти наверняка растение
+BIG_OBJECT_FRACTION = 0.22  # один объект занимает столько кадра — это лист/растение
+MIN_GRAINS = 12             # столько частиц — это проба зерна (в т.ч. насыпанная горкой)
+GRAIN_WARMTH_MIN = 5.0      # зерно тёплого цвета (R заметно больше B); серое/чужое — нет
 
 
 def _green_fraction(image_bgr: np.ndarray) -> float:
@@ -69,60 +57,29 @@ def _crops_are_warm(crops) -> bool:
     return float(np.median(diffs)) >= GRAIN_WARMTH_MIN
 
 
-def _looks_like_grain(crops, image_shape, biggest_blob_frac: float) -> bool:
-    """Строгий признак пробы зерна: МНОГО ТЁПЛЫХ частиц И ни одного
-    доминирующего связного объекта.
-
-    Раньше хватало «≥12 сегментов + тёплый цвет», и гора/почва/лист (тоже тёплые)
-    проходили как зерно: watershed режет любой крупный объект на мелкие куски,
-    поэтому размер частиц лист от зерна НЕ отличает. Отличает biggest_blob_frac —
-    доля кадра под самым крупным связным куском переднего плана: у россыпи ~0.001,
-    у плотной горки зерна ~0.05 (между зёрнами есть тени/зазоры), а у горы/листа —
-    0.3-0.44. Поэтому это и есть главный фильтр; порог держит горку и отсекает
-    крупные объекты. MAX_GRAIN_AREA_FRAC — свободная страховка сверху."""
-    if len(crops) < MIN_GRAINS:
-        return False
-    if biggest_blob_frac > GRAIN_MAX_BLOB_FRAC:
-        return False
-    if not _crops_are_warm(crops):
-        return False
-    h, w = image_shape[:2]
-    frame_area = float(h * w)
-    if frame_area <= 0:
-        return False
-    areas = np.array([c.area_px for c in crops], dtype=np.float64)
-    median_frac = float(np.median(areas)) / frame_area
-    return median_frac <= MAX_GRAIN_AREA_FRAC
-
-
 def detect_module(image_bgr: np.ndarray) -> str:
     """Возвращает один из вариантов:
-    - 'grain'       — проба зерна (много мелких тёплых частиц, без доминирующего объекта);
+    - 'grain'       — проба зерна (много мелких частиц), даже насыпанная горкой;
     - 'disease'     — растение/лист (много зелёного);
     - 'maybe_plant' — один крупный не-зелёный объект: возможно лист, а возможно
                       постороннее фото — решаем по уверенности модели болезней;
     - 'unknown'     — не похоже ни на зерно, ни на растение.
     """
-    # 1) зелёное — это растение/лист
+    # 1) зелёное — это растение
     if _green_fraction(image_bgr) >= GREEN_FRACTION_MIN:
         return "disease"
-
-    # 2) строгий признак зерна: россыпь/горка мелких тёплых частиц без одного
-    #    доминирующего объекта. Дешёвые проверки (число, тепло, размер) — раньше,
-    #    затем главный фильтр biggest_blob_frac (см. _looks_like_grain).
+    # 2) много мелких частиц — проба зерна (сначала считаем зёрна, потом уже
+    #    смотрим на «один большой объект», иначе горка зерна ошибочно уходит в лист).
+    #    Дополнительно проверяем «тёплый» цвет самих частиц: серые/чужие текстуры
+    #    тоже дробятся на сегменты, но зерно жёлто-коричневое.
     try:
         crops = segment_grains(image_bgr)
     except Exception:  # noqa: BLE001
         crops = []
-    big = _largest_blob_fraction(image_bgr)
-    if _looks_like_grain(crops, image_bgr.shape, big):
+    if len(crops) >= MIN_GRAINS and _crops_are_warm(crops):
         return "grain"
-
-    # 3) один крупный объект без зелени — вероятно лист (модель болезней решит
-    #    по уверенности; постороннее фото — гора, предмет — отсеётся низкой
-    #    уверенностью и станет 'unknown' выше по стеку).
-    if big >= BIG_OBJECT_FRACTION:
+    # 3) один крупный объект без зелени — вероятно лист (но проверим уверенностью)
+    if _largest_blob_fraction(image_bgr) >= BIG_OBJECT_FRACTION:
         return "maybe_plant"
-
-    # 4) ничего из этого — не наше фото
+    # 4) ничего из этого
     return "unknown"
