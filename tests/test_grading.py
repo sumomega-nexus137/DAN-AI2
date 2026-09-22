@@ -1,6 +1,6 @@
 """Тесты логики классности и экономики — самой ответственной части проекта.
 
-Здесь считается то, что фермер увидит как «5 класс, 70 000 ₸ за тонну,
+Здесь считается то, что фермер увидит как «3 класс, 113 000 ₸ за тонну,
 после очистки +15 000». Ошибка тут стоит дороже, чем ошибка модели на
 одном зерне, поэтому граничные случаи закрыты тестами.
 
@@ -25,6 +25,10 @@ def titles(assessment) -> list[str]:
     return [r.title for r in assessment.recommendations]
 
 
+def in_range(price, rng) -> bool:
+    return rng[0] <= price <= rng[1]
+
+
 # --- пустая проба: главный опасный случай ---------------------------------
 
 
@@ -41,22 +45,57 @@ def test_empty_sample_has_no_grade_and_no_price():
     assert "не удалось выделить" in a.confidence_note
 
 
-# --- чистая партия ---------------------------------------------------------
+# --- чистые партии -> высокие классы (не «всегда ниже 5-го») ----------------
 
 
-def test_clean_sample_is_third_grade():
+def test_perfect_sample_is_first_grade():
+    a = grading.assess(counts(celoe=1000))
+    assert a.grade == 1
+    assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[1])
+
+
+def test_clean_sample_reaches_top_grades():
+    """97% целых -> 1 класс (раньше логика упирала такую пробу в 3-й)."""
     a = grading.assess(counts(celoe=970, bitoe=20, shuploe=10))
+    assert a.grade == 1
+    assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[1])
 
-    assert a.grade == 3
-    assert a.price_kzt_per_ton == config.PRICE_CLASS_3_KZT
-    assert a.price_range_kzt_per_ton == (
-        config.PRICE_CLASS_3_MIN_KZT,
-        config.PRICE_CLASS_3_MAX_KZT,
-    )
-    assert a.potential_gain_kzt_per_ton == 0
-    # 3 класс — лучший, терять нечего
-    assert a.loss_vs_best_kzt_per_ton == 0
-    assert titles(a) == ["Партия в хорошем состоянии"]
+
+def test_second_grade_reachable():
+    a = grading.assess(counts(celoe=950, bitoe=50))  # 5% зерновой примеси
+    assert a.grade == 2
+    assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[2])
+
+
+def test_foreign_impurity_within_norm_gives_no_sieving_advice():
+    a = grading.assess(counts(celoe=990, primes=10))  # 1% сора
+    assert a.grade == 1
+    assert "Просеять: много сора" not in titles(a)
+
+
+# --- цена реагирует на состав (плавно, «математика внутри») -----------------
+
+
+def test_price_is_within_class_range():
+    a = grading.assess(counts(celoe=880, bitoe=80, shuploe=40))  # ~3 класс
+    assert a.grade is not None
+    assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[a.grade])
+
+
+def test_dirtier_sample_of_same_class_is_cheaper():
+    """Внутри одного класса грязнее проба -> ниже цена (не ступенька)."""
+    cleaner = grading.assess(counts(celoe=930, bitoe=40, shuploe=30))  # 7% зерн.прим
+    dirtier = grading.assess(counts(celoe=910, bitoe=50, shuploe=40))  # 9% зерн.прим
+    assert cleaner.grade == dirtier.grade  # оба один класс
+    assert cleaner.price_kzt_per_ton > dirtier.price_kzt_per_ton
+
+
+def test_prices_are_monotonic_by_quality():
+    p1 = grading.assess(counts(celoe=1000)).price_kzt_per_ton
+    p3 = grading.assess(counts(celoe=880, bitoe=80, shuploe=40)).price_kzt_per_ton
+    p5 = grading.assess(counts(celoe=800, bitoe=100, shuploe=50, primes=50)).price_kzt_per_ton
+    fodder = grading.assess(counts(celoe=900, primes=100)).price_kzt_per_ton
+    assert p1 > p3 > p5 > fodder
 
 
 # --- грязная партия: сор + битое -------------------------------------------
@@ -69,29 +108,16 @@ def test_dirty_sample_gets_cleaning_advice_and_upgrade():
     assert a.grade == 5
     assert a.foreign_pct == 5.0
     assert a.grain_impurity_pct == 15.0
-    assert a.price_kzt_per_ton == config.PRICE_CLASS_5_KZT
+    assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[5])
 
-    # очистка убирает сор и часть битого -> 4 класс
-    assert a.potential_grade == 4
-    assert a.potential_gain_kzt_per_ton == (
-        config.PRICE_CLASS_4_KZT - config.PRICE_CLASS_5_KZT
-    )
+    # очистка убирает сор и часть битого -> класс выше
+    assert a.potential_grade is not None and a.potential_grade < a.grade
+    assert a.potential_gain_kzt_per_ton > 0
 
-    # теряем против 3 класса
-    assert a.loss_vs_best_kzt_per_ton == (
-        config.PRICE_CLASS_3_KZT - config.PRICE_CLASS_5_KZT
-    )
     assert "Просеять: много сора" in titles(a)
     assert "Дочистить на сепараторе" in titles(a)
-    assert "Очистить партию — поднимете до 4 класса" in titles(a)
+    assert any(t.startswith("Очистить партию — поднимете до") for t in titles(a))
     assert "Не выводится выше — продавайте на корм" in titles(a)
-
-
-def test_foreign_impurity_within_norm_gives_no_sieving_advice():
-    a = grading.assess(counts(celoe=990, primes=10))  # 1% сора, норма 2%
-
-    assert a.grade == 3
-    assert "Просеять: много сора" not in titles(a)
 
 
 # --- проросшее: очисткой не лечится ----------------------------------------
@@ -99,7 +125,6 @@ def test_foreign_impurity_within_norm_gives_no_sieving_advice():
 
 def test_sprouted_grain_warns_about_storage_not_cleaning():
     a = grading.assess(counts(celoe=950, prorosshee=50))  # 5% проросшего
-
     assert "Проверить склад — есть проростки" in titles(a)
     # проросшее очистка не убирает, класс подняться не должен
     assert a.potential_grade == a.grade
@@ -115,20 +140,18 @@ def test_sprouted_above_three_percent_is_high_priority():
 
 
 def test_below_fifth_grade_shows_fodder_price_and_gain():
-    """Ниже 5 класса — показываем фуражную цену (не «нет цены») и прибавку от неё."""
+    """Ниже 5 класса — показываем фуражную цену (не «нет цены») и прибавку."""
     a = grading.assess(counts(celoe=900, primes=100))  # 10% сора
 
     assert a.grade is None
     assert a.grade_label == "Фуражное (ниже 5 класса)"
-    # цена показывается всегда — это фуражное зерно
-    assert a.price_kzt_per_ton == config.PRICE_FODDER_KZT
-    assert a.price_range_kzt_per_ton is not None
-    assert a.potential_grade == 3
-    assert a.potential_gain_kzt_per_ton == (
-        config.PRICE_CLASS_3_KZT - config.PRICE_FODDER_KZT
-    )
-    # совет поднять класс обязан появиться, хотя текущего класса нет
-    assert "Очистить партию — поднимете до 3 класса" in titles(a)
+    assert a.price_kzt_per_ton is not None
+    assert in_range(a.price_kzt_per_ton, grading.FODDER_RANGE_KZT)
+    assert a.price_range_kzt_per_ton == grading.FODDER_RANGE_KZT
+    # сор убирается очисткой -> можно поднять до товарного класса
+    assert a.potential_grade is not None
+    assert a.potential_gain_kzt_per_ton > 0
+    assert any(t.startswith("Очистить партию — поднимете до") for t in titles(a))
 
 
 # --- доверие к оценке -------------------------------------------------------
@@ -136,8 +159,7 @@ def test_below_fifth_grade_shows_fodder_price_and_gain():
 
 def test_small_sample_gets_confidence_warning():
     a = grading.assess(counts(celoe=50))
-
-    assert a.grade == 3
+    assert a.grade == 1
     assert a.confidence_note is not None
     assert str(grading.MIN_GRAINS_FOR_CONFIDENCE) in a.confidence_note
 
@@ -170,3 +192,12 @@ def test_numbers_are_formatted_in_russian():
     assert grading._pct(15.0) == "15,0%"
     assert grading._kzt(15000) == "15 000 ₸"
     assert grading._kzt(102000) == "102 000 ₸"
+
+
+# --- цены монотонны по лесенке классов -------------------------------------
+
+
+def test_class_price_ladder_is_monotonic():
+    mids = [grading.GRADE_PRICES_KZT[g] for g in grading.GRADES]
+    assert mids == sorted(mids, reverse=True)  # 1 класс дороже 2, и т.д.
+    assert mids[-1] > config.PRICE_FODDER_KZT  # 5 класс дороже фуража
