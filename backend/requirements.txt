@@ -12,3 +12,6 @@ python-dotenv
 google-generativeai
 scipy
 scikit-image
+# CPU-ускоритель DINOv2 (используется только при DNAI_ONNX=1 + экспортированном
+# models/<model>.onnx; на GPU не задействуется). Импортируется лениво.
+onnxruntime

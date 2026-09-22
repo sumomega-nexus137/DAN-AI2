@@ -5,35 +5,50 @@
 Порядок как просили: сначала поднимается сайт и сразу даётся ссылка на него,
 потом стартует Telegram-бот.
 
+★ ГЛАВНОЕ ДЛЯ СКОРОСТИ ★
+Включи GPU: Runtime → Change runtime type → T4 GPU → Save. На CPU DINOv2
+медленный при любых оптимизациях (10+ сек), на T4 — доли секунды. Ячейка
+сама проверит и громко предупредит, если GPU нет.
+
 Все ключи вводятся ниже и живут только в этом Colab — в код и git не попадают.
 
 Как пользоваться:
-1. Открой https://colab.research.google.com → New notebook.
-   (GPU T4 ускорит ещё сильнее, но прототип оптимизирован и под CPU.)
+1. https://colab.research.google.com → New notebook → включи T4 GPU (см. выше).
 2. Скопируй весь код в ОДНУ ячейку.
-3. Впиши три значения ниже.
-4. Runtime → Run all. Через 1-2 минуты появится кликабельная ссылка на сайт.
+3. Впиши значения ниже.
+4. Runtime → Run all. Через 1-2 минуты — кликабельная ссылка на сайт.
 5. Держи ноутбук запущенным, пока показываешь сайт/бота.
 """
 
 # ── ВПИШИ СВОЁ ───────────────────────────────────────────────────────────────
 NGROK_AUTHTOKEN = "ВСТАВЬ"      # ngrok, раздел Your Authtoken (обязательно для сайта)
-TELEGRAM_BOT_TOKEN = "ВСТАВЬ"  # токен ОТДЕЛЬНОГО бота DAN-AI2 от @BotFather
+TELEGRAM_BOT_TOKEN = "ВСТАВЬ"  # токен ОТДЕЛЬНОГО бота DAN-AI2 (@DANAI2BOT) от @BotFather
 #                                (оставь "" если бот не нужен; НЕ бери токен оригинала —
 #                                 на одном токене два поллера конфликтуют, 409 Conflict)
 GEMINI_API_KEY = "ВСТАВЬ"      # ключ Gemini, aistudio.google.com/apikey (консультант и голос)
+GITHUB_TOKEN = ""              # нужен ТОЛЬКО если репозиторий приватный. Personal Access
+#                                Token (github.com → Settings → Developer settings →
+#                                Tokens, права: repo/Contents:read). Если репо публичный —
+#                                оставь пустым.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json as _json
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 
 # Этот репозиторий (DAN-AI2), рабочая ветка с оптимизациями скорости.
-REPO = "https://github.com/sumomega-nexus137/DAN-AI2.git"
+OWNER_REPO = "sumomega-nexus137/DAN-AI2"
 BRANCH = "claude/epic-einstein-6gxxlm"
 WORKDIR = "/content/DAN-AI2"
+
+# приватный репо → клонируем по токену; публичный → без него
+if GITHUB_TOKEN and GITHUB_TOKEN not in ("", "ВСТАВЬ"):
+    REPO = f"https://{GITHUB_TOKEN}@github.com/{OWNER_REPO}.git"
+else:
+    REPO = f"https://github.com/{OWNER_REPO}.git"
 
 # гасим прошлый запуск, если был
 subprocess.run(["pkill", "-f", "uvicorn"])
@@ -47,23 +62,70 @@ except Exception:
 
 # всегда берём свежий код (модели и собранный сайт уже внутри репозитория)
 subprocess.run(["rm", "-rf", WORKDIR])
-subprocess.run(["git", "clone", "-b", BRANCH, REPO, WORKDIR], check=True)
+clone = subprocess.run(
+    ["git", "clone", "-b", BRANCH, REPO, WORKDIR],
+    capture_output=True,
+    text=True,
+)
+if clone.returncode != 0:
+    print("!! git clone не удался. Причина ниже:")
+    print((clone.stderr or "").replace(GITHUB_TOKEN or "___", "***") or "(нет stderr)")
+    print(
+        "\nЧаще всего это ПРИВАТНЫЙ репозиторий. Два решения:\n"
+        "  1) Впиши GITHUB_TOKEN выше (Personal Access Token с доступом к репо), ИЛИ\n"
+        "  2) Сделай репозиторий публичным: GitHub → репо → Settings → General →\n"
+        "     Danger Zone → Change visibility → Public.\n"
+        "Затем перезапусти ячейку (Runtime → Run all)."
+    )
+    raise SystemExit("clone failed")
 os.chdir(WORKDIR)
 
-# зависимости backend'а и бота
+# зависимости backend'а и бота (torch/onnxruntime уже в requirements)
 subprocess.run(
     ["pip", "install", "-q", "-r", "backend/requirements.txt", "-r", "bot/requirements.txt", "pyngrok"],
     check=True,
 )
 
+# ── ПРОВЕРКА GPU (главный фактор скорости) ───────────────────────────────────
+gpu = False
+try:
+    import torch
+
+    gpu = torch.cuda.is_available()
+except Exception:
+    gpu = False
+
+speed_env = {}
+if gpu:
+    print("=" * 64)
+    print("  GPU НАЙДЕН:", torch.cuda.get_device_name(0))
+    print("  DINOv2 пойдёт на GPU в fp16 — фото будет разбираться за доли секунды.")
+    print("=" * 64)
+    speed_env["DNAI_FP16"] = "1"
+else:
+    print("!" * 64)
+    print("  ВНИМАНИЕ: GPU НЕ ВКЛЮЧЁН — на CPU разбор фото будет МЕДЛЕННЫМ (10+ сек).")
+    print("  Сделай: Runtime → Change runtime type → T4 GPU → Save, потом Run all.")
+    print("!" * 64)
+    # раз уж CPU — включим ONNX Runtime (1.5-3x к скорости на CPU): экспортируем
+    # модель один раз и попросим backend идти через onnxruntime.
+    print("Пробую ускорить CPU через ONNX (одноразовый экспорт)…")
+    exp = subprocess.run([sys.executable, "scripts/export_dinov2_onnx.py"], text=True)
+    onnx_file = "models/dinov2_vits14.onnx"
+    if exp.returncode == 0 and os.path.exists(onnx_file):
+        speed_env["DNAI_ONNX"] = "1"
+        print("ONNX включён (DNAI_ONNX=1).")
+    else:
+        print("ONNX не собрался — остаёмся на PyTorch CPU (медленнее, но работает).")
+
 # ── 1) BACKEND: сайт + модель + ИИ-консультант ───────────────────────────────
-# Ключ Gemini уходит только в окружение процесса backend.
-backend_env = {**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY}
+# Ключ Gemini и флаги скорости уходят только в окружение процесса backend.
+backend_env = {**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY, **speed_env}
 subprocess.Popen(
     ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"],
     env=backend_env,
 )
-print("Поднимаю backend (первый раз качается модель DINOv2, ~минута)…")
+print("\nПоднимаю backend (первый раз качается модель DINOv2, ~минута)…")
 ready = False
 for _ in range(120):
     try:
