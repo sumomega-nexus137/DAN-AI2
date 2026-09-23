@@ -68,6 +68,9 @@ except Exception:
     pass
 
 # всегда берём свежий код (модели и собранный сайт уже внутри репозитория)
+# при повторном запуске текущая папка — это WORKDIR, который сейчас удалим;
+# выходим из неё, иначе git clone падает с «Unable to read current working directory»
+os.chdir(os.path.dirname(WORKDIR))
 subprocess.run(["rm", "-rf", WORKDIR])
 clone = subprocess.run(
     ["git", "clone", "-b", BRANCH, REPO, WORKDIR],
@@ -77,7 +80,8 @@ clone = subprocess.run(
 if clone.returncode != 0:
     print("!! git clone не удался. Причина ниже:")
     print((clone.stderr or "").replace(GITHUB_TOKEN or "___", "***") or "(нет stderr)")
-    print(
+    if "Authentication" in (clone.stderr or "") or "not found" in (clone.stderr or "").lower():
+      print(
         "\nЧаще всего это ПРИВАТНЫЙ репозиторий. Два решения:\n"
         "  1) Впиши GITHUB_TOKEN выше (Personal Access Token с доступом к репо), ИЛИ\n"
         "  2) Сделай репозиторий публичным: GitHub → репо → Settings → General →\n"
