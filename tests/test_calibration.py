@@ -54,3 +54,35 @@ def test_really_dirty_batch_stays_low():
     probs = np.array([dirty] * 30 + [healthy] * 90)
     a = grading.assess(pipeline._count_classes(probs, CLASSES))
     assert a.grade is None or a.grade == 5
+
+
+def _c(cel, bit=0, shu=0, pro=0, pri=0):
+    return {"celoe_zdorovoe": cel, "bitoe_povrezhdennoe": bit, "shuploe_melkoe": shu,
+            "prorosshee": pro, "primes": pri}
+
+
+def test_batch_scale_typical_photo_is_commercial_class():
+    """Как на скрине: модель видит ~55% брака на обычном зерне -> товарный класс."""
+    a = grading.assess(pipeline._calibrate_to_batch(_c(54, bit=36, shu=10, pro=4, pri=16)))
+    assert a.grade is not None and a.grade <= 4
+
+
+def test_batch_scale_trash_stays_fodder():
+    a = grading.assess(pipeline._calibrate_to_batch(_c(0, bit=70, pro=50)))
+    assert a.grade is None
+
+
+def test_batch_scale_is_monotonic():
+    """Больше брака на фото -> класс не лучше и цена не выше."""
+    grades, prices = [], []
+    for bad in (10, 30, 50, 70, 90, 110):
+        a = grading.assess(pipeline._calibrate_to_batch(_c(120 - bad, bit=bad)))
+        grades.append(a.grade if a.grade is not None else 6)
+        prices.append(a.price_kzt_per_ton)
+    assert grades == sorted(grades)
+    assert prices == sorted(prices, reverse=True)
+
+
+def test_batch_scale_keeps_total():
+    c = _c(54, bit=36, shu=10, pro=4, pri=16)
+    assert abs(sum(pipeline._calibrate_to_batch(c).values()) - 120) < 1e-9

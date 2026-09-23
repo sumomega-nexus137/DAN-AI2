@@ -39,6 +39,31 @@ def _adjust_to_real_batch(probs: np.ndarray, classes: list[str]) -> np.ndarray:
     return adjusted
 
 
+def _calibrate_to_batch(counts: dict[str, float]) -> dict[str, float]:
+    """Доли брака, видимые на фото, -> реалистичный масштаб партии.
+
+    Монотонно: чем больше брака видит модель, тем больше его остаётся после
+    пересчёта, и тем ниже класс. Внутри зерновой примеси пропорции между
+    битым/щуплым/проросшим сохраняются. См. GRAIN_CAL_* в config."""
+    n = float(sum(counts.values()))
+    if n <= 0:
+        return counts
+    gi_keys = grading.GRAIN_IMPURITY_CLASSES
+    gi_obs = sum(counts.get(k, 0) for k in gi_keys)
+    x = gi_obs / n
+    y = counts.get("primes", 0) / n
+    gi = config.GRAIN_CAL_A * x * x + config.GRAIN_CAL_B * x
+    f = config.GRAIN_CAL_F * y
+
+    out: dict[str, float] = {k: 0.0 for k in grading.CLASS_LABELS_RU}
+    if gi_obs > 0:
+        for k in gi_keys:
+            out[k] = gi * n * counts.get(k, 0) / gi_obs
+    out["primes"] = f * n
+    out[HEALTHY_CLASS] = n - sum(v for k, v in out.items() if k != HEALTHY_CLASS)
+    return out
+
+
 def _count_classes(probs: np.ndarray, classes: list[str]) -> dict[str, int]:
     """Вероятности по зёрнам -> число зёрен в каждой категории."""
     counts = {cls: 0 for cls in grading.CLASS_LABELS_RU}
@@ -99,7 +124,7 @@ def analyze(image_bytes: bytes) -> dict:
         analyzed = len(embeddings)
         if analyzed:
             probs = head.predict_proba(embeddings)
-            counts = _count_classes(probs, head.classes)
+            counts = _calibrate_to_batch(_count_classes(probs, head.classes))
 
     assessment = grading.assess(counts)
     payload = _to_payload(assessment, counts, time.perf_counter() - started, demo=False)
@@ -128,7 +153,7 @@ def _to_payload(
             {
                 "key": key,
                 "label": grading.CLASS_LABELS_RU[key],
-                "count": counts.get(key, 0),
+                "count": int(round(counts.get(key, 0))),
                 "percent": round(assessment.percentages[key], 1),
             }
             for key in grading.CLASS_LABELS_RU

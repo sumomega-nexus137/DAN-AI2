@@ -363,7 +363,7 @@ def assess(counts: dict[str, int]) -> GrainAssessment:
         )
 
     return GrainAssessment(
-        total_grains=total,
+        total_grains=int(round(total)),
         percentages=pct,
         foreign_pct=foreign_pct,
         grain_impurity_pct=grain_impurity_pct,
