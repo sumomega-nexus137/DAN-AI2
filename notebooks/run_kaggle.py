@@ -32,6 +32,13 @@ import sys
 import time
 import urllib.request
 
+# Kaggle/Colab буферизуют вывод ячейки — без flush сообщения появляются с
+# задержкой и кажется, что всё зависло. Печатаем сразу.
+import builtins as _b
+import functools as _ft
+
+print = _ft.partial(_b.print, flush=True)  # noqa: A001
+
 # Этот репозиторий (DAN-AI2), рабочая ветка с оптимизациями скорости.
 OWNER_REPO = "sumomega-nexus137/DAN-AI2"
 BRANCH = "claude/epic-einstein-6gxxlm"
