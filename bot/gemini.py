@@ -71,7 +71,7 @@ def _models() -> list[str]:
     обычно касается одной модели — поэтому переключение спасает от обоих."""
     main = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     extra = os.environ.get(
-        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash"
+        "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
     ).split(",")
     out = []
     for m in [main, *extra]:
@@ -223,7 +223,8 @@ def _is_overloaded(exc: Exception) -> bool:
 
 async def _generate(turns) -> tuple[str, str]:
     errors = []
-    for model in _models():
+    queue = _models()
+    for model in queue:
         for name, fn in _BACKENDS:
             for attempt in range(2):
                 try:
@@ -238,12 +239,20 @@ async def _generate(turns) -> tuple[str, str]:
                         await asyncio.sleep(1.2)  # всплеск нагрузки — один быстрый повтор
                         continue
                     errors.append(f"{model}: {_short(exc)}")
+                    # 404 «модель устарела, используйте models/X» — Google сам
+                    # подсказывает замену: добавляем её в очередь
+                    import re as _re
+
+                    hint = _re.search(r"use models/([\w.\-]+)", str(exc))
+                    if hint and hint.group(1) not in queue:
+                        queue.append(hint.group(1))
                     break
             else:
                 continue
             # лимит/перегрузка у этой модели — другой путь к ней не поможет,
             # сразу переходим к следующей модели
-            if errors and (_is_quota(Exception(errors[-1])) or _is_overloaded(Exception(errors[-1]))):
+            last = errors[-1] if errors else ""
+            if last and (_is_quota(Exception(last)) or _is_overloaded(Exception(last)) or ": 404" in last):
                 break
     # последний шанс — старый SDK на основной модели
     try:
