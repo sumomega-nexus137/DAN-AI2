@@ -65,8 +65,20 @@ def _key() -> str:
     return os.environ.get("GEMINI_API_KEY", "")
 
 
-def _model() -> str:
-    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+def _models() -> list[str]:
+    """Цепочка моделей: основная из GEMINI_MODEL, затем запасные. Бесплатный
+    лимит у Google считается отдельно на каждую модель, и перегрузка (503)
+    обычно касается одной модели — поэтому переключение спасает от обоих."""
+    main = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    extra = os.environ.get(
+        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash"
+    ).split(",")
+    out = []
+    for m in [main, *extra]:
+        m = m.strip()
+        if m and m not in out:
+            out.append(m)
+    return out
 
 
 def _short(exc: Exception) -> str:
@@ -85,7 +97,7 @@ def _short(exc: Exception) -> str:
 _genai_client = None
 
 
-async def _via_genai(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+async def _via_genai(turns: list[tuple[str, list[tuple]]], model: str) -> tuple[str, str]:
     global _genai_client
     from google import genai
     from google.genai import types
@@ -107,14 +119,14 @@ async def _via_genai(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
     )
     try:
         resp = await _genai_client.aio.models.generate_content(
-            model=_model(), contents=contents,
+            model=model, contents=contents,
             config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0), **cfg),
         )
     except Exception as exc:  # модель без поддержки thinking — пробуем без него
         if "thinking" not in str(exc).lower():
             raise
         resp = await _genai_client.aio.models.generate_content(
-            model=_model(), contents=contents, config=types.GenerateContentConfig(**cfg),
+            model=model, contents=contents, config=types.GenerateContentConfig(**cfg),
         )
     reason = ""
     if resp.candidates:
@@ -131,7 +143,7 @@ async def _via_genai(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
 _http_client: httpx.AsyncClient | None = None
 
 
-async def _via_rest(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+async def _via_rest(turns: list[tuple[str, list[tuple]]], model: str) -> tuple[str, str]:
     global _http_client
     if _http_client is None:
         _http_client = httpx.AsyncClient(timeout=TIMEOUT_S)
@@ -148,7 +160,7 @@ async def _via_rest(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
         "generationConfig": gen,
         "safetySettings": [{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in _CATEGORIES],
     }
-    url = _REST_URL.format(model=_model())
+    url = _REST_URL.format(model=model)
     resp = await _http_client.post(url, params={"key": _key()}, json=body)
     if resp.status_code == 400 and "thinking" in resp.text.lower():
         gen.pop("thinkingConfig", None)
@@ -164,18 +176,18 @@ async def _via_rest(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
 
 
 # ---------- 3) старый google-generativeai --------------------------------------
-async def _via_legacy(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+async def _via_legacy(turns: list[tuple[str, list[tuple]]], model: str) -> tuple[str, str]:
     import google.generativeai as legacy
 
     legacy.configure(api_key=_key())
-    model = legacy.GenerativeModel(_model(), system_instruction=SYSTEM_PROMPT)
+    lm = legacy.GenerativeModel(model, system_instruction=SYSTEM_PROMPT)
 
     def conv(p):
         return p[1] if p[0] == "text" else {"mime_type": p[1], "data": p[2]}
 
     contents = [{"role": role, "parts": [conv(p) for p in parts]} for role, parts in turns]
     result = await asyncio.to_thread(
-        model.generate_content,
+        lm.generate_content,
         contents,
         safety_settings=[{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in _CATEGORIES],
         generation_config={"temperature": 0.5, "max_output_tokens": MAX_OUTPUT_TOKENS},
@@ -194,25 +206,59 @@ async def _via_legacy(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
     return text, reason
 
 
-_BACKENDS = (("genai", _via_genai), ("rest", _via_rest), ("legacy", _via_legacy))
+# Для каждой модели: сначала genai, при непонятной ошибке — REST. Старый SDK
+# оставлен последним средством на основной модели.
+_BACKENDS = (("genai", _via_genai), ("rest", _via_rest))
+
+
+def _is_quota(exc: Exception) -> bool:
+    t = str(exc).lower()
+    return "429" in t or "quota" in t or "resourceexhausted" in t
+
+
+def _is_overloaded(exc: Exception) -> bool:
+    t = str(exc).lower()
+    return "503" in t or "overloaded" in t or "high demand" in t or "unavailable" in t
 
 
 async def _generate(turns) -> tuple[str, str]:
     errors = []
-    for name, fn in _BACKENDS:
-        try:
-            text, reason = await asyncio.wait_for(fn(turns), timeout=TIMEOUT_S + 5)
-            if text.strip():
-                return text, reason
-            errors.append(f"{name}: пустой ответ ({reason or 'нет причины'})")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Gemini через %s не ответил", name)
-            errors.append(f"{name}: {_short(exc)}")
-            # 429 = исчерпан лимит проекта: другие пути идут в тот же лимит,
-            # пробовать их бессмысленно — только сожжём ещё запросы
-            if "429" in str(exc) or "quota" in str(exc).lower():
+    for model in _models():
+        for name, fn in _BACKENDS:
+            for attempt in range(2):
+                try:
+                    text, reason = await asyncio.wait_for(fn(turns, model), timeout=TIMEOUT_S + 5)
+                    if text.strip():
+                        return text, reason
+                    errors.append(f"{model}/{name}: пустой ответ ({reason or 'нет причины'})")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Gemini %s через %s: %s", model, name, _short(exc))
+                    if _is_overloaded(exc) and attempt == 0:
+                        await asyncio.sleep(1.2)  # всплеск нагрузки — один быстрый повтор
+                        continue
+                    errors.append(f"{model}: {_short(exc)}")
+                    break
+            else:
+                continue
+            # лимит/перегрузка у этой модели — другой путь к ней не поможет,
+            # сразу переходим к следующей модели
+            if errors and (_is_quota(Exception(errors[-1])) or _is_overloaded(Exception(errors[-1]))):
                 break
-    raise GeminiError(" | ".join(errors))
+    # последний шанс — старый SDK на основной модели
+    try:
+        text, reason = await asyncio.wait_for(_via_legacy(turns, _models()[0]), timeout=TIMEOUT_S + 5)
+        if text.strip():
+            return text, reason
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"legacy: {_short(exc)}")
+    # короткая причина: без дублей
+    seen, uniq = set(), []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            uniq.append(e)
+    raise GeminiError(" | ".join(uniq[:4]))
 
 
 async def ask(user_parts: list[tuple]) -> str:
