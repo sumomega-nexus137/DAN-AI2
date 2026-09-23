@@ -61,6 +61,11 @@ def audio_part(mime_type: str, data: bytes) -> tuple:
     return ("audio", mime_type, data)
 
 
+def _is_bad_request(exc: Exception) -> bool:
+    t = str(exc).lower()
+    return "400" in t or "invalid argument" in t or "invalid_argument" in t or "thinking" in t
+
+
 def _key() -> str:
     return os.environ.get("GEMINI_API_KEY", "")
 
@@ -71,7 +76,7 @@ def _models() -> list[str]:
     обычно касается одной модели — поэтому переключение спасает от обоих."""
     main = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     extra = os.environ.get(
-        "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
+        "GEMINI_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.6-flash"
     ).split(",")
     out = []
     for m in [main, *extra]:
@@ -117,17 +122,27 @@ async def _via_genai(turns: list[tuple[str, list[tuple]]], model: str) -> tuple[
         max_output_tokens=MAX_OUTPUT_TOKENS,
         safety_settings=[types.SafetySetting(category=c, threshold="BLOCK_ONLY_HIGH") for c in _CATEGORIES],
     )
-    try:
-        resp = await _genai_client.aio.models.generate_content(
-            model=model, contents=contents,
-            config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0), **cfg),
-        )
-    except Exception as exc:  # модель без поддержки thinking — пробуем без него
-        if "thinking" not in str(exc).lower():
-            raise
-        resp = await _genai_client.aio.models.generate_content(
-            model=model, contents=contents, config=types.GenerateContentConfig(**cfg),
-        )
+    variants = [
+        # быстрее всего: без «мышления» (у 2.5 — thinking_budget=0)
+        dict(cfg, thinking_config=types.ThinkingConfig(thinking_budget=0)),
+        # модели, у которых thinking настраивается иначе (3.x) — без него
+        dict(cfg),
+        # самый простой запрос: без safety, если модель их не принимает
+        dict(system_instruction=SYSTEM_PROMPT, max_output_tokens=MAX_OUTPUT_TOKENS),
+    ]
+    last_exc = None
+    for v in variants:
+        try:
+            resp = await _genai_client.aio.models.generate_content(
+                model=model, contents=contents, config=types.GenerateContentConfig(**v),
+            )
+            break
+        except Exception as exc:  # 400 «invalid argument» — пробуем проще
+            last_exc = exc
+            if not _is_bad_request(exc):
+                raise
+    else:
+        raise last_exc
     reason = ""
     if resp.candidates:
         fr = resp.candidates[0].finish_reason
@@ -162,8 +177,11 @@ async def _via_rest(turns: list[tuple[str, list[tuple]]], model: str) -> tuple[s
     }
     url = _REST_URL.format(model=model)
     resp = await _http_client.post(url, params={"key": _key()}, json=body)
-    if resp.status_code == 400 and "thinking" in resp.text.lower():
+    if resp.status_code == 400:  # модель не приняла thinkingConfig — без него
         gen.pop("thinkingConfig", None)
+        resp = await _http_client.post(url, params={"key": _key()}, json=body)
+    if resp.status_code == 400:  # и без safetySettings
+        body.pop("safetySettings", None)
         resp = await _http_client.post(url, params={"key": _key()}, json=body)
     if resp.status_code >= 400:
         raise GeminiError(f"HTTP {resp.status_code}: {resp.text[:400]}")
@@ -226,7 +244,7 @@ async def _generate(turns) -> tuple[str, str]:
     queue = _models()
     for model in queue:
         for name, fn in _BACKENDS:
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
                     text, reason = await asyncio.wait_for(fn(turns, model), timeout=TIMEOUT_S + 5)
                     if text.strip():
@@ -235,8 +253,8 @@ async def _generate(turns) -> tuple[str, str]:
                     break
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Gemini %s через %s: %s", model, name, _short(exc))
-                    if _is_overloaded(exc) and attempt == 0:
-                        await asyncio.sleep(1.2)  # всплеск нагрузки — один быстрый повтор
+                    if _is_overloaded(exc) and attempt < 2:
+                        await asyncio.sleep(1.5 * (attempt + 1))  # всплеск нагрузки — повтор с паузой
                         continue
                     errors.append(f"{model}: {_short(exc)}")
                     # 404 «модель устарела, используйте models/X» — Google сам
