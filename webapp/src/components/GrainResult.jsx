@@ -165,6 +165,10 @@ export default function GrainResult({ data, onConsult }) {
           ))}
         </div>
 
+        {data.composition_note && (
+          <p className="mt-4 text-xs leading-relaxed text-slate-500">{data.composition_note}</p>
+        )}
+
         <details className="mt-5 border-t border-white/[0.06] pt-4 text-sm">
           <summary className="cursor-pointer text-slate-400 hover:text-slate-200">Показать таблицей</summary>
           <table className="mt-3 w-full text-left">

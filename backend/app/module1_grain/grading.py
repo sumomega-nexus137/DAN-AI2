@@ -229,7 +229,7 @@ def _build_recommendations(
         recs.append(
             Recommendation(
                 title="Просеять: много сора",
-                detail=f"Сорной примеси {_pct(foreign)} при норме 2%. Решётная очистка уберёт основное.",
+                detail=f"Сорной примеси {_pct(foreign)} при норме 2% (в пересчёте на партию). Решётная очистка уберёт основное.",
                 priority="high",
             )
         )
@@ -238,7 +238,7 @@ def _build_recommendations(
         recs.append(
             Recommendation(
                 title="Дочистить на сепараторе",
-                detail=f"Битого и щуплого {_pct(broken + thin)}. Калибровка по размеру отсеет мелочь.",
+                detail=f"Битого и щуплого {_pct(broken + thin)} в пересчёте на партию. Калибровка по размеру отсеет мелочь.",
                 priority="high" if broken + thin > 12.0 else "medium",
             )
         )
@@ -248,7 +248,7 @@ def _build_recommendations(
             Recommendation(
                 title="Проверить склад — есть проростки",
                 detail=(
-                    f"Проросшего {_pct(sprouted)}. Очисткой не убрать: проверьте влажность "
+                    f"Проросшего {_pct(sprouted)} в пересчёте на партию. Очисткой не убрать: проверьте влажность "
                     "и вентиляцию, продавайте быстрее."
                 ),
                 priority="high" if sprouted > 3.0 else "medium",

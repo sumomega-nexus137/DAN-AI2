@@ -87,9 +87,9 @@ GRAIN_DEFECT_MIN_CONFIDENCE = float(os.environ.get("GRAIN_DEFECT_MIN_CONFIDENCE"
 #   зерновая примесь: gi = A·x² + B·x   (x — доля битых+щуплых+проросших на фото)
 #   сорная примесь:   f  = F·y          (y — доля «сора» на фото; на фото это чаще
 #                                        всего ости и тени, поэтому коэффициент мал)
-GRAIN_CAL_A = float(os.environ.get("GRAIN_CAL_A", 0.30))
-GRAIN_CAL_B = float(os.environ.get("GRAIN_CAL_B", 0.04))
-GRAIN_CAL_F = float(os.environ.get("GRAIN_CAL_F", 0.05))
+GRAIN_CAL_A = float(os.environ.get("GRAIN_CAL_A", 0.35))
+GRAIN_CAL_B = float(os.environ.get("GRAIN_CAL_B", 0.06))
+GRAIN_CAL_F = float(os.environ.get("GRAIN_CAL_F", 0.06))
 
 # Модель DINOv2: vits14 — компромисс скорость/качество, ~84 МБ весов
 DINOV2_MODEL = os.environ.get("DINOV2_MODEL", "dinov2_vits14")

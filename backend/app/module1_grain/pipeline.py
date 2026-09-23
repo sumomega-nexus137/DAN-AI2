@@ -19,6 +19,12 @@ DEMO_COUNTS = {
 
 HEALTHY_CLASS = "celoe_zdorovoe"
 
+COMPOSITION_NOTE = (
+    "Состав — как модель видит зёрна на этом фото. Класс и цена считаются с "
+    "поправкой на съёмку: тени, блики и ости колосьев на фото дают ложный брак, "
+    "поэтому доли пересчитываются на реальную партию."
+)
+
 
 def _adjust_to_real_batch(probs: np.ndarray, classes: list[str]) -> np.ndarray:
     """Поправка вероятностей модели с обучающего распределения на реальное.
@@ -124,10 +130,20 @@ def analyze(image_bytes: bytes) -> dict:
         analyzed = len(embeddings)
         if analyzed:
             probs = head.predict_proba(embeddings)
-            counts = _calibrate_to_batch(_count_classes(probs, head.classes))
+            # что модель видит на фото (после поправки на априорные доли) —
+            # это и показываем фермеру как состав пробы
+            seen_counts = _count_classes(probs, head.classes)
+            # класс и цену считаем по составу в пересчёте на партию (поправка
+            # на съёмку: тени, блики, ости дают ложный брак на фото)
+            counts = _calibrate_to_batch(seen_counts)
 
     assessment = grading.assess(counts)
-    payload = _to_payload(assessment, counts, time.perf_counter() - started, demo=False)
+    payload = _to_payload(
+        assessment, counts, time.perf_counter() - started, demo=False,
+        display_counts=seen_counts if analyzed else None,
+    )
+    if analyzed:
+        payload["composition_note"] = COMPOSITION_NOTE
     payload["grains_detected_total"] = len(crops)
     payload["grains_analyzed"] = analyzed
     if analyzed and analyzed < len(crops):
@@ -143,7 +159,12 @@ def _to_payload(
     counts: dict[str, int],
     elapsed_s: float,
     demo: bool,
+    display_counts: dict[str, int] | None = None,
 ) -> dict:
+    # состав для показа: как модель видит зёрна на фото (если передан), иначе —
+    # тот же состав, по которому считался класс
+    shown = display_counts if display_counts is not None else counts
+    shown_total = float(sum(shown.values())) or 1.0
     return {
         "module": "grain_quality",
         "demo_mode": demo,
@@ -153,8 +174,8 @@ def _to_payload(
             {
                 "key": key,
                 "label": grading.CLASS_LABELS_RU[key],
-                "count": int(round(counts.get(key, 0))),
-                "percent": round(assessment.percentages[key], 1),
+                "count": int(round(shown.get(key, 0))),
+                "percent": round(100.0 * shown.get(key, 0) / shown_total, 1),
             }
             for key in grading.CLASS_LABELS_RU
         ],

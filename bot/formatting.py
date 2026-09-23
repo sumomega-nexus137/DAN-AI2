@@ -53,6 +53,8 @@ def format_grain(data: dict) -> str:
     for cat in data["categories"]:
         if cat["percent"] > 0:
             lines.append(f"• {cat['label']}: {_pct(cat['percent'])}")
+    if data.get("composition_note"):
+        lines.append(f"<i>{data['composition_note']}</i>")
 
     analyzed = data.get("grains_analyzed") or data.get("total_grains") or 0
     detected = data.get("grains_detected_total")
