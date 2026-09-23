@@ -21,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 
+import gemini
 from formatting import format_disease, format_grain
 
 load_dotenv()
@@ -41,7 +42,7 @@ WELCOME = (
     "🌾 <b>Проба зерна</b> — предварительный класс, цена за тонну, потери "
     "против 3 класса и прибавка после очистки\n"
     "🌱 <b>Лист или растение</b> — болезнь, вредитель или сорняк и меры обработки\n\n"
-    "Можно надиктовать голосовое (казахский или русский) — отвечу текстом.\n\n"
+    "Можно задать вопрос текстом или голосовым (казахский или русский) — отвечу подробно.\n\n"
     "<i>Как снимать зерно:</i> разложите пробу тонким слоем на контрастном фоне, "
     "снимайте сверху при ровном свете.\n"
     "<i>Как снимать растение:</i> поражённый лист крупным планом, при дневном свете."
@@ -94,12 +95,34 @@ async def _analyze_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         )
         return
     text = format_disease(data) if module == "disease" else format_grain(data)
+    # запоминаем итог анализа — следующие вопросы (текстом/голосом) консультант
+    # будет понимать в контексте этой партии/растения
+    context.user_data["last_analysis"] = _analysis_summary(data, module)
     parts = _split_for_telegram(text)
     # первую часть кладём в статус-сообщение, остальные (если ответ длинный) —
     # отдельными сообщениями, чтобы не упереться в лимит Telegram
     await status.edit_text(parts[0], parse_mode="HTML")
     for extra in parts[1:]:
         await update.message.reply_text(extra, parse_mode="HTML")
+
+
+def _analysis_summary(data: dict, module: str) -> str:
+    """Короткая выжимка анализа для контекста консультанта."""
+    if module == "disease":
+        d = data.get("diagnosis") or {}
+        return (
+            f"фото растения, диагноз: {d.get('name_ru')} "
+            f"(уверенность {round((d.get('confidence') or 0) * 100)}%)"
+        )
+    cats = ", ".join(
+        f"{c['label']} {c['percent']}%" for c in data.get("categories") or [] if c.get("percent")
+    )
+    price = data.get("price_kzt_per_ton")
+    return (
+        f"проба зерна: {data.get('grade_label')}"
+        + (", ориентировочная цена " + f"{price:,.0f}".replace(",", " ") + " ₸/т" if price else "")
+        + (f"; состав на фото: {cats}" if cats else "")
+    )
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,61 +137,15 @@ async def on_document_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _analyze_file_id(update, context, doc.file_id)
 
 
-VOICE_PROMPT = (
-    "Это аудио — вопрос фермера, на казахском ИЛИ на русском языке. "
-    "Сначала внимательно распознай сказанное (учти казахскую речь), затем "
-    "ответь СТРОГО на том же языке, на котором был задан вопрос, как опытный "
-    "агроном-консультант из Казахстана. Отвечай развёрнуто и подробно: объясни "
-    "причины, разбей ответ на понятные пункты или абзацы, дай конкретные "
-    "практические шаги, сроки и ориентиры по деньгам за тонну, где это уместно. "
-    "Не выдумывай точные дозировки препаратов — советуй уточнить их у агронома "
-    "по регламенту применения. Если вопрос про качество зерна или болезни "
-    "растений — добавь, что можно прислать фото боту для точной оценки. "
-    "Отвечай обычным текстом, без markdown."
+VOICE_TASK = (
+    "Это голосовое сообщение фермера (на казахском или русском). Внимательно "
+    "распознай речь, учитывая казахское произношение, и развёрнуто ответь на "
+    "вопрос из него на том же языке."
 )
-
-
-def _extract_text(result) -> str:
-    """Безопасно достаём текст ответа Gemini: result.text бросает исключение,
-    если ответ пустой/заблокирован, поэтому пробуем и кандидатов."""
-    try:
-        text = (result.text or "").strip()
-        if text:
-            return text
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        for cand in getattr(result, "candidates", []) or []:
-            parts = getattr(getattr(cand, "content", None), "parts", []) or []
-            joined = " ".join(getattr(p, "text", "") for p in parts).strip()
-            if joined:
-                return joined
-    except Exception:  # noqa: BLE001
-        pass
-    return ""
-
-
-# Агрономия — это разговоры про протравители, фунгициды и дозы. Стандартные
-# фильтры Gemini нередко режут такие ответы в пустоту, и пользователь видел
-# «не расслышал». Поэтому блокируем только явно опасный контент.
-SAFETY = [
-    {"category": c, "threshold": "BLOCK_ONLY_HIGH"}
-    for c in (
-        "HARM_CATEGORY_HARASSMENT",
-        "HARM_CATEGORY_HATE_SPEECH",
-        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "HARM_CATEGORY_DANGEROUS_CONTENT",
-    )
-]
-# 2048 токенов — развёрнутый ответ помещается целиком и не обрывается. У
-# gemini-2.5-flash часть бюджета уходит на внутренний "thinking", поэтому
-# маленький лимит давал пустые ("не расслышал") и обрезанные ответы.
-GEN_CONFIG = {"temperature": 0.4, "max_output_tokens": 2048}
-GEMINI_TIMEOUT_S = 45
 
 # Telegram не принимает сообщения длиннее 4096 символов — длинный ответ иначе
 # просто не отправляется («сообщение потерялось»). Режем на части по границам
-# строк с запасом.
+# абзацев/строк с запасом и шлём несколькими сообщениями.
 TG_MAX_CHARS = 3800
 
 
@@ -176,7 +153,9 @@ def _split_for_telegram(text: str) -> list[str]:
     chunks: list[str] = []
     rest = text.strip()
     while len(rest) > TG_MAX_CHARS:
-        cut = rest.rfind("\n", 0, TG_MAX_CHARS)
+        cut = rest.rfind("\n\n", 0, TG_MAX_CHARS)
+        if cut <= 0:
+            cut = rest.rfind("\n", 0, TG_MAX_CHARS)
         if cut <= 0:
             cut = rest.rfind(" ", 0, TG_MAX_CHARS)
         if cut <= 0:
@@ -194,64 +173,83 @@ async def _reply_long(message, text: str, parse_mode: str | None = None) -> None
         await message.reply_text(part, parse_mode=parse_mode)
 
 
-async def _voice_reply(mime_type: str, audio_bytes: bytes) -> str:
-    """Аудио -> Gemini, с одним повтором при пустом ответе."""
-    import google.generativeai as genai
-
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    payload = [VOICE_PROMPT, {"mime_type": mime_type, "data": audio_bytes}]
-
-    for attempt in range(2):
-        try:
-            result = await asyncio.to_thread(
-                model.generate_content,
-                payload,
-                safety_settings=SAFETY,
-                generation_config=GEN_CONFIG,
-                request_options={"timeout": GEMINI_TIMEOUT_S},
-            )
-            text = _extract_text(result)
-            if text:
-                return text
-            logger.warning("Пустой ответ Gemini на голосовое (попытка %d)", attempt + 1)
-        except Exception:  # noqa: BLE001
-            logger.exception("Ошибка Gemini на голосовом (попытка %d)", attempt + 1)
-        await asyncio.sleep(1.0)
-    return ""
+def _context_parts(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    last = context.user_data.get("last_analysis")
+    if not last:
+        return []
+    return [gemini.text_part(
+        f"Контекст: последний анализ фото этого фермера — {last}. "
+        "Учитывай его, если вопрос относится к этой партии или растению."
+    )]
 
 
-async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Голосовое -> напрямую в Gemini Flash (он и распознаёт речь, и отвечает)."""
+async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[dict]) -> None:
+    """Вопрос -> Gemini -> развёрнутый ответ несколькими сообщениями.
+    Пока ждём ответ, держим индикатор «печатает…»."""
     if not GEMINI_API_KEY:
         await update.message.reply_text(
-            "Голосовые пока недоступны: не задан GEMINI_API_KEY на сервере."
+            "Консультант пока недоступен: не задан GEMINI_API_KEY на сервере."
         )
         return
 
-    await context.bot.send_chat_action(update.message.chat_id, ChatAction.TYPING)
+    chat_id = update.message.chat_id
+    stop = asyncio.Event()
 
-    voice = update.message.voice or update.message.audio
-    tg_file = await context.bot.get_file(voice.file_id)
-    buffer = BytesIO()
-    await tg_file.download_to_memory(buffer)
-    audio_bytes = buffer.getvalue()
+    async def keep_typing() -> None:
+        while not stop.is_set():
+            try:
+                await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=4.5)
+            except asyncio.TimeoutError:
+                pass
 
-    reply = await _voice_reply(voice.mime_type or "audio/ogg", audio_bytes)
+    typing_task = asyncio.create_task(keep_typing())
+    reply = ""
+    try:
+        for attempt in range(2):
+            try:
+                reply = await gemini.ask(parts)
+            except Exception:  # noqa: BLE001
+                logger.exception("Ошибка Gemini (попытка %d)", attempt + 1)
+                reply = ""
+            if reply:
+                break
+    finally:
+        stop.set()
+        await typing_task
+
     if reply:
         await _reply_long(update.message, reply)
     else:
         await update.message.reply_text(
-            "Не расслышал вопрос. Запишите ещё раз чуть длиннее и ближе к "
-            "микрофону, без фонового шума — или напишите вопрос текстом."
+            "Не получилось ответить — попробуйте ещё раз через несколько секунд "
+            "(для голосового: чуть ближе к микрофону и без шума)."
         )
 
 
-async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_html(
-        "Пришлите фото пробы зерна или растения — разберу.\n"
-        "Или надиктуйте голосовое с вопросом.\n\n/start — как это работает"
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Голосовое -> Gemini (он и распознаёт речь, и отвечает)."""
+    voice = update.message.voice or update.message.audio
+    tg_file = await context.bot.get_file(voice.file_id)
+    buffer = BytesIO()
+    await tg_file.download_to_memory(buffer)
+    parts = (
+        [gemini.text_part(VOICE_TASK)]
+        + _context_parts(context)
+        + [gemini.audio_part(voice.mime_type or "audio/ogg", buffer.getvalue())]
     )
+    await _answer(update, context, parts)
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Текстовый вопрос -> консультант (с учётом последнего анализа фото)."""
+    question = (update.message.text or "").strip()
+    if not question:
+        return
+    await _answer(update, context, _context_parts(context) + [gemini.text_part(question)])
 
 
 def main() -> None:
@@ -260,7 +258,9 @@ def main() -> None:
             "Не задан TELEGRAM_BOT_TOKEN. Скопируйте .env.example в .env и заполните его."
         )
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # concurrent_updates: несколько сообщений/пользователей обрабатываются
+    # параллельно, а не в очередь друг за другом
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, on_document_image))
