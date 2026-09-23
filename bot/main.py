@@ -207,16 +207,15 @@ async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
                 pass
 
     typing_task = asyncio.create_task(keep_typing())
-    reply = ""
+    reply, error = "", ""
     try:
-        for attempt in range(2):
-            try:
-                reply = await gemini.ask(parts)
-            except Exception:  # noqa: BLE001
-                logger.exception("Ошибка Gemini (попытка %d)", attempt + 1)
-                reply = ""
-            if reply:
-                break
+        reply = await gemini.ask(parts)
+    except gemini.GeminiError as exc:
+        error = str(exc)
+        logger.error("Gemini не ответил: %s", error)
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Ошибка консультанта")
     finally:
         stop.set()
         await typing_task
@@ -225,8 +224,8 @@ async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: lis
         await _reply_long(update.message, reply)
     else:
         await update.message.reply_text(
-            "Не получилось ответить — попробуйте ещё раз через несколько секунд "
-            "(для голосового: чуть ближе к микрофону и без шума)."
+            "Не получилось ответить, попробуйте ещё раз.\n\n"
+            f"Техническая причина: {error[:600] or 'пустой ответ модели'}"
         )
 
 

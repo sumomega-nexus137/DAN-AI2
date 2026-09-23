@@ -1,14 +1,17 @@
-"""Быстрый клиент Gemini для бота: прямой REST-вызов через httpx.
+"""Клиент Gemini для бота: быстро, без обрывов, с запасными путями.
 
-Почему не google-generativeai SDK:
-* у gemini-2.5-flash по умолчанию включено «мышление» (thinking) — оно
-  съедает часть лимита ответа (ответ обрывался на полуслове) и добавляет
-  секунды задержки. Через REST его можно выключить (thinkingBudget=0);
-* если ответ всё же упёрся в лимит (finishReason=MAX_TOKENS), просим модель
-  продолжить с места остановки и склеиваем — ответ никогда не теряется;
-* одно общее HTTP-соединение на весь бот — без лишних рукопожатий.
+Порядок попыток (первая успешная — ответ):
+1. google-genai (официальный новый SDK, асинхронный): «мышление» выключено
+   (thinking_budget=0) — быстрее и не съедает лимит ответа;
+2. прямой REST через httpx с тем же thinkingBudget=0;
+3. старый google-generativeai SDK (через него бот отвечал раньше) — с большим
+   лимитом токенов.
+Если ответ упёрся в лимит (MAX_TOKENS), просим продолжение и склеиваем.
+Если все пути упали — поднимаем GeminiError с короткой причиной, её бот
+покажет пользователю, чтобы по скрину было понятно, что не так.
 """
 
+import asyncio
 import base64
 import logging
 import os
@@ -17,25 +20,16 @@ import httpx
 
 logger = logging.getLogger("dnai-bot")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
 MAX_OUTPUT_TOKENS = int(os.environ.get("BOT_MAX_OUTPUT_TOKENS", 8192))
-MAX_CONTINUATIONS = 2  # сколько раз дописывать, если упёрлись в лимит
+MAX_CONTINUATIONS = 2
 TIMEOUT_S = float(os.environ.get("BOT_GEMINI_TIMEOUT", 60))
-
-# Агрономия — протравители, фунгициды, дозы: стандартные фильтры режут такие
-# ответы в пустоту. Блокируем только явно опасное.
-_SAFETY = [
-    {"category": c, "threshold": "BLOCK_ONLY_HIGH"}
-    for c in (
-        "HARM_CATEGORY_HARASSMENT",
-        "HARM_CATEGORY_HATE_SPEECH",
-        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "HARM_CATEGORY_DANGEROUS_CONTENT",
-    )
-]
+_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_CATEGORIES = (
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+)
 
 SYSTEM_PROMPT = (
     "Ты — опытный агроном-консультант сервиса Dän-AI для фермеров Казахстана: "
@@ -51,78 +45,186 @@ SYSTEM_PROMPT = (
     "без markdown (без звёздочек и решёток); для списков используй «•» или "
     "нумерацию. Всегда заканчивай мысль полностью."
 )
-
-_client: httpx.AsyncClient | None = None
-
-
-def _http() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(timeout=TIMEOUT_S)
-    return _client
+CONTINUE_PROMPT = "Продолжи ответ ровно с того места, где остановился, без повторов."
 
 
-def _gen_config(with_thinking_off: bool) -> dict:
-    cfg = {"temperature": 0.5, "maxOutputTokens": MAX_OUTPUT_TOKENS}
-    if with_thinking_off:
-        cfg["thinkingConfig"] = {"thinkingBudget": 0}
-    return cfg
+class GeminiError(Exception):
+    pass
 
 
-def _extract(data: dict) -> tuple[str, str]:
-    """(текст, finishReason) из ответа REST."""
+# Части сообщения во внутреннем виде: ("text", str) или ("audio", mime, bytes)
+def text_part(text: str) -> tuple:
+    return ("text", text)
+
+
+def audio_part(mime_type: str, data: bytes) -> tuple:
+    return ("audio", mime_type, data)
+
+
+def _key() -> str:
+    return os.environ.get("GEMINI_API_KEY", "")
+
+
+def _model() -> str:
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def _short(exc: Exception) -> str:
+    """Коротко и по-человечески: код ошибки + message из ответа Google."""
+    import re
+
+    raw = str(exc)
+    code = re.search(r"\b(4\d\d|5\d\d)\b", raw)
+    msg = re.search(r"""['"]message['"]\s*:\s*['"]([^'"]+)""", raw)
+    if msg:
+        return f"{code.group(1) + ' ' if code else ''}{msg.group(1)}"[:200]
+    return f"{type(exc).__name__}: {raw[:160]}"
+
+
+# ---------- 1) google-genai ----------------------------------------------------
+_genai_client = None
+
+
+async def _via_genai(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+    global _genai_client
+    from google import genai
+    from google.genai import types
+
+    if _genai_client is None:
+        _genai_client = genai.Client(api_key=_key())
+
+    def conv(p):
+        if p[0] == "text":
+            return types.Part.from_text(text=p[1])
+        return types.Part.from_bytes(data=p[2], mime_type=p[1])
+
+    contents = [types.Content(role=role, parts=[conv(p) for p in parts]) for role, parts in turns]
+    cfg = dict(
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.5,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        safety_settings=[types.SafetySetting(category=c, threshold="BLOCK_ONLY_HIGH") for c in _CATEGORIES],
+    )
+    try:
+        resp = await _genai_client.aio.models.generate_content(
+            model=_model(), contents=contents,
+            config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0), **cfg),
+        )
+    except Exception as exc:  # модель без поддержки thinking — пробуем без него
+        if "thinking" not in str(exc).lower():
+            raise
+        resp = await _genai_client.aio.models.generate_content(
+            model=_model(), contents=contents, config=types.GenerateContentConfig(**cfg),
+        )
+    reason = ""
+    if resp.candidates:
+        fr = resp.candidates[0].finish_reason
+        reason = getattr(fr, "name", str(fr or ""))
+    try:
+        text = resp.text or ""
+    except Exception:  # noqa: BLE001
+        text = ""
+    return text, reason
+
+
+# ---------- 2) REST -------------------------------------------------------------
+_http_client: httpx.AsyncClient | None = None
+
+
+async def _via_rest(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=TIMEOUT_S)
+
+    def conv(p):
+        if p[0] == "text":
+            return {"text": p[1]}
+        return {"inlineData": {"mimeType": p[1], "data": base64.b64encode(p[2]).decode()}}
+
+    gen = {"temperature": 0.5, "maxOutputTokens": MAX_OUTPUT_TOKENS, "thinkingConfig": {"thinkingBudget": 0}}
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": role, "parts": [conv(p) for p in parts]} for role, parts in turns],
+        "generationConfig": gen,
+        "safetySettings": [{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in _CATEGORIES],
+    }
+    url = _REST_URL.format(model=_model())
+    resp = await _http_client.post(url, params={"key": _key()}, json=body)
+    if resp.status_code == 400 and "thinking" in resp.text.lower():
+        gen.pop("thinkingConfig", None)
+        resp = await _http_client.post(url, params={"key": _key()}, json=body)
+    if resp.status_code >= 400:
+        raise GeminiError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+    data = resp.json()
     cands = data.get("candidates") or []
     if not cands:
         return "", (data.get("promptFeedback") or {}).get("blockReason", "NO_CANDIDATES")
-    cand = cands[0]
-    parts = (cand.get("content") or {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
-    return text, cand.get("finishReason", "")
+    parts = (cands[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts if not p.get("thought")), cands[0].get("finishReason", "")
 
 
-async def _call(contents: list[dict]) -> tuple[str, str]:
-    # ключ/модель читаем в момент вызова: .env может загрузиться позже импорта
-    model = os.environ.get("GEMINI_MODEL", GEMINI_MODEL)
-    key = os.environ.get("GEMINI_API_KEY", GEMINI_API_KEY)
-    url = _URL.format(model=model)
-    body = {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": contents,
-        "generationConfig": _gen_config(with_thinking_off=True),
-        "safetySettings": _SAFETY,
-    }
-    resp = await _http().post(url, params={"key": key}, json=body)
-    if resp.status_code == 400 and "thinking" in resp.text.lower():
-        # модель без поддержки thinkingConfig (напр. gemini-2.0-flash) — без него
-        body["generationConfig"] = _gen_config(with_thinking_off=False)
-        resp = await _http().post(url, params={"key": key}, json=body)
-    resp.raise_for_status()
-    return _extract(resp.json())
+# ---------- 3) старый google-generativeai --------------------------------------
+async def _via_legacy(turns: list[tuple[str, list[tuple]]]) -> tuple[str, str]:
+    import google.generativeai as legacy
+
+    legacy.configure(api_key=_key())
+    model = legacy.GenerativeModel(_model(), system_instruction=SYSTEM_PROMPT)
+
+    def conv(p):
+        return p[1] if p[0] == "text" else {"mime_type": p[1], "data": p[2]}
+
+    contents = [{"role": role, "parts": [conv(p) for p in parts]} for role, parts in turns]
+    result = await asyncio.to_thread(
+        model.generate_content,
+        contents,
+        safety_settings=[{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in _CATEGORIES],
+        generation_config={"temperature": 0.5, "max_output_tokens": MAX_OUTPUT_TOKENS},
+        request_options={"timeout": TIMEOUT_S},
+    )
+    reason = ""
+    try:
+        fr = result.candidates[0].finish_reason
+        reason = getattr(fr, "name", str(fr))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        text = result.text or ""
+    except Exception:  # noqa: BLE001
+        text = ""
+    return text, reason
 
 
-async def ask(user_parts: list[dict]) -> str:
-    """Один вопрос (текст и/или аудио) -> полный ответ. Если ответ упёрся в
-    лимит токенов — дописываем продолжение, чтобы ничего не обрывалось."""
-    contents = [{"role": "user", "parts": user_parts}]
-    text, reason = await _call(contents)
+_BACKENDS = (("genai", _via_genai), ("rest", _via_rest), ("legacy", _via_legacy))
+
+
+async def _generate(turns) -> tuple[str, str]:
+    errors = []
+    for name, fn in _BACKENDS:
+        try:
+            text, reason = await asyncio.wait_for(fn(turns), timeout=TIMEOUT_S + 5)
+            if text.strip():
+                return text, reason
+            errors.append(f"{name}: пустой ответ ({reason or 'нет причины'})")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Gemini через %s не ответил", name)
+            errors.append(f"{name}: {_short(exc)}")
+    raise GeminiError(" | ".join(errors))
+
+
+async def ask(user_parts: list[tuple]) -> str:
+    """Вопрос (текст и/или аудио) -> полный ответ, без обрывов."""
+    if not _key():
+        raise GeminiError("не задан GEMINI_API_KEY")
+    turns = [("user", user_parts)]
+    text, reason = await _generate(turns)
     full = text
     for _ in range(MAX_CONTINUATIONS):
-        if reason != "MAX_TOKENS" or not text:
+        if "MAX_TOKENS" not in str(reason).upper():
             break
-        contents += [
-            {"role": "model", "parts": [{"text": text}]},
-            {"role": "user", "parts": [{"text": "Продолжи ответ ровно с того места, где остановился, без повторов."}]},
-        ]
-        text, reason = await _call(contents)
+        turns += [("model", [text_part(text)]), ("user", [text_part(CONTINUE_PROMPT)])]
+        try:
+            text, reason = await _generate(turns)
+        except GeminiError:
+            break
         full += text
-    if reason not in ("STOP", "MAX_TOKENS", ""):
-        logger.warning("Gemini finishReason=%s", reason)
     return full.strip()
-
-
-def text_part(text: str) -> dict:
-    return {"text": text}
-
-
-def audio_part(mime_type: str, data: bytes) -> dict:
-    return {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(data).decode()}}

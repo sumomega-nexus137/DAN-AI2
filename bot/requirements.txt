@@ -2,3 +2,4 @@ python-telegram-bot==21.9
 httpx
 python-dotenv
 google-generativeai
+google-genai
