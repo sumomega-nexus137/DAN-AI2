@@ -17,13 +17,41 @@ DEMO_COUNTS = {
     "primes": 39,
 }
 
-# Классы «повреждения» зерна. На телефонных фото (не на чистом сканере, где
-# обучалась модель) освещение и тени заставляют модель чаще ошибочно относить
-# нормальные зёрна к повреждённым. Поэтому зерно засчитываем как повреждённое
-# только если модель уверена: иначе считаем его здоровым. Это убирает ложный
-# «брак» и не завышает класс на реально плохих партиях (там модель уверена).
-DAMAGE_CLASSES = {"bitoe_povrezhdennoe", "shuploe_melkoe", "prorosshee"}
-DAMAGE_MIN_CONFIDENCE = 0.55
+HEALTHY_CLASS = "celoe_zdorovoe"
+
+
+def _adjust_to_real_batch(probs: np.ndarray, classes: list[str]) -> np.ndarray:
+    """Поправка вероятностей модели с обучающего распределения на реальное.
+
+    Голова обучена на сбалансированном датасете (по 20% на класс), поэтому её
+    вероятности «заточены» под мир, где каждое пятое зерно — сор. Умножаем на
+    отношение реальной доли класса к обучающей и перенормируем (байесовская
+    поправка на сдвиг априорных вероятностей). Сами признаки и голова не
+    меняются — меняется только то, как мы читаем её ответ."""
+    ratios = np.array(
+        [config.GRAIN_REAL_PRIORS.get(c, config.GRAIN_TRAIN_PRIOR) / config.GRAIN_TRAIN_PRIOR for c in classes],
+        dtype=np.float64,
+    )
+    # ослабленная поправка (α<1): см. GRAIN_PRIOR_STRENGTH в config
+    weights = ratios ** config.GRAIN_PRIOR_STRENGTH
+    adjusted = probs * weights
+    adjusted /= adjusted.sum(axis=1, keepdims=True)
+    return adjusted
+
+
+def _count_classes(probs: np.ndarray, classes: list[str]) -> dict[str, int]:
+    """Вероятности по зёрнам -> число зёрен в каждой категории."""
+    counts = {cls: 0 for cls in grading.CLASS_LABELS_RU}
+    adjusted = _adjust_to_real_batch(probs, classes)
+    for row in adjusted:
+        top = int(np.argmax(row))
+        cls = classes[top]
+        # «плохой» класс засчитываем только при уверенной модели; сомнение —
+        # в пользу целого зерна (тени/блики на телефонном фото — не брак)
+        if cls != HEALTHY_CLASS and float(row[top]) < config.GRAIN_DEFECT_MIN_CONFIDENCE:
+            cls = HEALTHY_CLASS
+        counts[cls] += 1
+    return counts
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:
@@ -71,14 +99,7 @@ def analyze(image_bytes: bytes) -> dict:
         analyzed = len(embeddings)
         if analyzed:
             probs = head.predict_proba(embeddings)
-            classes = head.classes
-            for row in probs:
-                top = int(np.argmax(row))
-                cls = classes[top]
-                # неуверенный «брак» -> считаем зерно здоровым (см. DAMAGE_* выше)
-                if cls in DAMAGE_CLASSES and float(row[top]) < DAMAGE_MIN_CONFIDENCE:
-                    cls = "celoe_zdorovoe"
-                counts[cls] += 1
+            counts = _count_classes(probs, head.classes)
 
     assessment = grading.assess(counts)
     payload = _to_payload(assessment, counts, time.perf_counter() - started, demo=False)

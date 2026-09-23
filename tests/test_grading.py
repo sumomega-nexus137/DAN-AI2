@@ -55,21 +55,21 @@ def test_perfect_sample_is_first_grade():
 
 
 def test_clean_sample_reaches_top_grades():
-    """97% целых -> 1 класс (раньше логика упирала такую пробу в 3-й)."""
-    a = grading.assess(counts(celoe=970, bitoe=20, shuploe=10))
+    """98,5% целых -> 1 класс (не «вечный фураж»)."""
+    a = grading.assess(counts(celoe=985, bitoe=10, shuploe=5))
     assert a.grade == 1
     assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[1])
 
 
 def test_second_grade_reachable():
-    a = grading.assess(counts(celoe=950, bitoe=50))  # 5% зерновой примеси
+    a = grading.assess(counts(celoe=965, bitoe=35))  # 3,5% зерновой примеси
     assert a.grade == 2
     assert in_range(a.price_kzt_per_ton, grading.GRADE_PRICE_RANGES_KZT[2])
 
 
 def test_foreign_impurity_within_norm_gives_no_sieving_advice():
     a = grading.assess(counts(celoe=990, primes=10))  # 1% сора
-    assert a.grade == 1
+    assert a.grade == 2
     assert "Просеять: много сора" not in titles(a)
 
 
@@ -84,8 +84,8 @@ def test_price_is_within_class_range():
 
 def test_dirtier_sample_of_same_class_is_cheaper():
     """Внутри одного класса грязнее проба -> ниже цена (не ступенька)."""
-    cleaner = grading.assess(counts(celoe=930, bitoe=40, shuploe=30))  # 7% зерн.прим
-    dirtier = grading.assess(counts(celoe=910, bitoe=50, shuploe=40))  # 9% зерн.прим
+    cleaner = grading.assess(counts(celoe=950, bitoe=30, shuploe=20))  # 5% зерн.прим
+    dirtier = grading.assess(counts(celoe=930, bitoe=40, shuploe=30))  # 7% зерн.прим
     assert cleaner.grade == dirtier.grade  # оба один класс
     assert cleaner.price_kzt_per_ton > dirtier.price_kzt_per_ton
 

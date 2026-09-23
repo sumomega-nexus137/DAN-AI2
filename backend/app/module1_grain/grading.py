@@ -39,11 +39,11 @@ FOREIGN_IMPURITY_CLASSES = ("primes",)
 # Упрощённые пороги классности (в процентах от пробы). Лесенка 1..5:
 # чем выше класс (меньше номер), тем строже по чистоте.
 GRADE_LIMITS = {
-    1: {"foreign_max": 1.0, "grain_impurity_max": 3.0, "sprouted_max": 0.5},
-    2: {"foreign_max": 2.0, "grain_impurity_max": 6.0, "sprouted_max": 1.0},
-    3: {"foreign_max": 2.0, "grain_impurity_max": 10.0, "sprouted_max": 2.0},
-    4: {"foreign_max": 4.0, "grain_impurity_max": 15.0, "sprouted_max": 3.0},
-    5: {"foreign_max": 5.0, "grain_impurity_max": 18.0, "sprouted_max": 5.0},
+    1: {"foreign_max": 0.5, "grain_impurity_max": 2.0, "sprouted_max": 0.3},
+    2: {"foreign_max": 1.0, "grain_impurity_max": 4.0, "sprouted_max": 0.5},
+    3: {"foreign_max": 2.0, "grain_impurity_max": 8.0, "sprouted_max": 1.5},
+    4: {"foreign_max": 3.0, "grain_impurity_max": 12.0, "sprouted_max": 2.5},
+    5: {"foreign_max": 5.0, "grain_impurity_max": 20.0, "sprouted_max": 5.0},
 }
 GRADES = (1, 2, 3, 4, 5)
 
@@ -370,7 +370,7 @@ def assess(counts: dict[str, int]) -> GrainAssessment:
         sound_pct=sound_pct,
         grade=grade,
         grade_label=grade_label,
-        price_kzt_per_ton=round(price),
+        price_kzt_per_ton=int(round(price, -2)),
         price_range_kzt_per_ton=price_range,
         potential_grade=potential_grade,
         potential_gain_kzt_per_ton=gain,

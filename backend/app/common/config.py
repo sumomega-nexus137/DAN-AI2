@@ -19,32 +19,65 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
-# Ориентировочные закупочные цены мягкой пшеницы, тенге за тонну — вилка
-# «от и до» по каждому классу. Лесенка монотонная, шаг ~15 тыс. ₸: чем выше
-# класс (меньше номер), тем дороже. Переопределяются через окружение —
-# рынок меняется. Ориентир: закуп мукомольной пшеницы в РК, сезон 2024/25.
-PRICE_CLASS_1_MIN_KZT = float(os.environ.get("PRICE_CLASS_1_MIN_KZT", 130_000))
-PRICE_CLASS_1_MAX_KZT = float(os.environ.get("PRICE_CLASS_1_MAX_KZT", 155_000))
-PRICE_CLASS_2_MIN_KZT = float(os.environ.get("PRICE_CLASS_2_MIN_KZT", 120_000))
-PRICE_CLASS_2_MAX_KZT = float(os.environ.get("PRICE_CLASS_2_MAX_KZT", 135_000))
-PRICE_CLASS_3_MIN_KZT = float(os.environ.get("PRICE_CLASS_3_MIN_KZT", 105_000))
-PRICE_CLASS_3_MAX_KZT = float(os.environ.get("PRICE_CLASS_3_MAX_KZT", 122_000))
-PRICE_CLASS_4_MIN_KZT = float(os.environ.get("PRICE_CLASS_4_MIN_KZT", 90_000))
-PRICE_CLASS_4_MAX_KZT = float(os.environ.get("PRICE_CLASS_4_MAX_KZT", 105_000))
-PRICE_CLASS_5_MIN_KZT = float(os.environ.get("PRICE_CLASS_5_MIN_KZT", 75_000))
-PRICE_CLASS_5_MAX_KZT = float(os.environ.get("PRICE_CLASS_5_MAX_KZT", 90_000))
+# Цены продажи мягкой пшеницы фермером (элеватор/трейдер/мукомол, с НДС),
+# Акмолинская область и север РК, новый урожай осень 2026, тенге за тонну.
+# Опорные точки, по которым выставлены вилки:
+#   * мукомолы РК, урожай-2026: 3 класс (клейковина 27%) — 118 750 ₸ с НДС,
+#     5 класс — 90 000 ₸ с НДС (не выше; большинство сделок ниже);
+#   * Продкорпорация: 3 класс (клейковина от 23%) — 85 000 ₸, 4 класс —
+#     77 000–80 000 ₸ (это нижняя, «гарантированная» граница рынка);
+#   * рынок/объявления север РК: 3 класс 80–110 тыс., 4 класс 75–92 тыс.,
+#     5 класс 72–85 тыс., фураж 58–72 тыс.
+# Вилки не пересекаются, чтобы лесенка классов читалась однозначно.
+# Переопределяются через окружение — рынок меняется.
+PRICE_CLASS_1_MIN_KZT = float(os.environ.get("PRICE_CLASS_1_MIN_KZT", 128_000))
+PRICE_CLASS_1_MAX_KZT = float(os.environ.get("PRICE_CLASS_1_MAX_KZT", 140_000))
+PRICE_CLASS_2_MIN_KZT = float(os.environ.get("PRICE_CLASS_2_MIN_KZT", 118_000))
+PRICE_CLASS_2_MAX_KZT = float(os.environ.get("PRICE_CLASS_2_MAX_KZT", 128_000))
+PRICE_CLASS_3_MIN_KZT = float(os.environ.get("PRICE_CLASS_3_MIN_KZT", 98_000))
+PRICE_CLASS_3_MAX_KZT = float(os.environ.get("PRICE_CLASS_3_MAX_KZT", 118_000))
+PRICE_CLASS_4_MIN_KZT = float(os.environ.get("PRICE_CLASS_4_MIN_KZT", 84_000))
+PRICE_CLASS_4_MAX_KZT = float(os.environ.get("PRICE_CLASS_4_MAX_KZT", 98_000))
+PRICE_CLASS_5_MIN_KZT = float(os.environ.get("PRICE_CLASS_5_MIN_KZT", 72_000))
+PRICE_CLASS_5_MAX_KZT = float(os.environ.get("PRICE_CLASS_5_MAX_KZT", 84_000))
 
 # Фуражное зерно — если партия не проходит даже 5 класс
-PRICE_FODDER_MIN_KZT = float(os.environ.get("PRICE_FODDER_MIN_KZT", 55_000))
+PRICE_FODDER_MIN_KZT = float(os.environ.get("PRICE_FODDER_MIN_KZT", 58_000))
 PRICE_FODDER_MAX_KZT = float(os.environ.get("PRICE_FODDER_MAX_KZT", 72_000))
 
 # Середина вилки — ориентир по умолчанию
-PRICE_CLASS_1_KZT = (PRICE_CLASS_1_MIN_KZT + PRICE_CLASS_1_MAX_KZT) / 2  # 142 500
-PRICE_CLASS_2_KZT = (PRICE_CLASS_2_MIN_KZT + PRICE_CLASS_2_MAX_KZT) / 2  # 127 500
-PRICE_CLASS_3_KZT = (PRICE_CLASS_3_MIN_KZT + PRICE_CLASS_3_MAX_KZT) / 2  # 113 500
-PRICE_CLASS_4_KZT = (PRICE_CLASS_4_MIN_KZT + PRICE_CLASS_4_MAX_KZT) / 2  # 97 500
-PRICE_CLASS_5_KZT = (PRICE_CLASS_5_MIN_KZT + PRICE_CLASS_5_MAX_KZT) / 2  # 82 500
-PRICE_FODDER_KZT = (PRICE_FODDER_MIN_KZT + PRICE_FODDER_MAX_KZT) / 2  # 63 500
+PRICE_CLASS_1_KZT = (PRICE_CLASS_1_MIN_KZT + PRICE_CLASS_1_MAX_KZT) / 2  # 134 000
+PRICE_CLASS_2_KZT = (PRICE_CLASS_2_MIN_KZT + PRICE_CLASS_2_MAX_KZT) / 2  # 123 000
+PRICE_CLASS_3_KZT = (PRICE_CLASS_3_MIN_KZT + PRICE_CLASS_3_MAX_KZT) / 2  # 108 000
+PRICE_CLASS_4_KZT = (PRICE_CLASS_4_MIN_KZT + PRICE_CLASS_4_MAX_KZT) / 2  # 91 000
+PRICE_CLASS_5_KZT = (PRICE_CLASS_5_MIN_KZT + PRICE_CLASS_5_MAX_KZT) / 2  # 78 000
+PRICE_FODDER_KZT = (PRICE_FODDER_MIN_KZT + PRICE_FODDER_MAX_KZT) / 2  # 65 000
+
+# --- Поправка вывода модели зерна на реальную партию (label shift) ---
+# Голова обучена на СБАЛАНСИРОВАННОМ GrainSet: по 4 000 изображений на каждый
+# из 5 классов, т.е. «в среднем каждое пятое зерно — сор, каждое пятое —
+# битое». В товарной партии всё иначе: 85–95% зёрен целые. Без поправки
+# модель на любом неоднозначном кропе (тень, блик, соседнее зерно в кадре)
+# склоняется к «плохому» классу — отсюда вечный «фураж» на чистом зерне.
+# Байесовская поправка: p(класс|фото) · π_реальная(класс) / π_обучения(класс).
+# Доли — по числу зёрен в типичной партии, сдаваемой на элеватор.
+GRAIN_TRAIN_PRIOR = 0.2  # GrainSet-сплит сбалансирован: 1/5 на класс
+GRAIN_REAL_PRIORS = {
+    "celoe_zdorovoe": float(os.environ.get("PRIOR_CELOE", 0.90)),
+    "bitoe_povrezhdennoe": float(os.environ.get("PRIOR_BITOE", 0.04)),
+    "shuploe_melkoe": float(os.environ.get("PRIOR_SHUPLOE", 0.03)),
+    "prorosshee": float(os.environ.get("PRIOR_PROROSSHEE", 0.01)),
+    "primes": float(os.environ.get("PRIOR_PRIMES", 0.02)),
+}
+# Сила поправки (степень α у отношения долей). α=1 — полная байесовская
+# поправка: она съедает и настоящий брак, потому что на «чужих» фото модель
+# переуверена. α=0.7 подобран на симуляции: зерно, в котором модель сомневается
+# (уверенность в браке 40–85%), считается целым, а уверенный брак (90%+)
+# остаётся браком — реально грязная партия так и остаётся 5 классом/фуражом.
+GRAIN_PRIOR_STRENGTH = float(os.environ.get("GRAIN_PRIOR_STRENGTH", 0.7))
+# Засчитываем зерно как «плохое» только если после поправки модель уверена
+# в этом больше чем на столько. Иначе — целое (сомнение в пользу фермера).
+GRAIN_DEFECT_MIN_CONFIDENCE = float(os.environ.get("GRAIN_DEFECT_MIN_CONFIDENCE", 0.50))
 
 # Модель DINOv2: vits14 — компромисс скорость/качество, ~84 МБ весов
 DINOV2_MODEL = os.environ.get("DINOV2_MODEL", "dinov2_vits14")
