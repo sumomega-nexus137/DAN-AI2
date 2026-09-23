@@ -121,19 +121,40 @@ else:
 # ── 1) BACKEND: сайт + модель + ИИ-консультант ───────────────────────────────
 # Ключ Gemini и флаги скорости уходят только в окружение процесса backend.
 backend_env = {**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY, **speed_env}
-subprocess.Popen(
-    ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"],
-    env=backend_env,
+backend_log = open("/tmp/dnai_backend.log", "wb")
+backend_proc = subprocess.Popen(
+    [sys.executable, "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"],
+    env=backend_env, stdout=backend_log, stderr=subprocess.STDOUT,
 )
-print("\nПоднимаю backend (первый раз качается модель DINOv2, ~минута)…")
+print("\nПоднимаю backend: качаю и прогреваю модель DINOv2 (первый раз 1-3 минуты)…", flush=True)
+
+
+def _last_log_line() -> str:
+    try:
+        lines = [l for l in open("/tmp/dnai_backend.log", errors="ignore").read().splitlines() if l.strip()]
+        return lines[-1][:150] if lines else "…"
+    except Exception:
+        return "…"
+
+
 ready = False
-for _ in range(120):
+started_wait = time.time()
+last_report = 0.0
+while time.time() - started_wait < 420:  # до 7 минут
+    if backend_proc.poll() is not None:
+        print("!! backend упал при запуске. Последние строки лога:", flush=True)
+        print(open("/tmp/dnai_backend.log", errors="ignore").read()[-2500:], flush=True)
+        break
     try:
         urllib.request.urlopen("http://localhost:8000/health", timeout=2)
         ready = True
         break
     except Exception:
-        time.sleep(3)
+        pass
+    if time.time() - last_report >= 15:
+        last_report = time.time()
+        print(f"  …{int(time.time() - started_wait)} с | {_last_log_line()}", flush=True)
+    time.sleep(2)
 
 if ready:
     info = _json.loads(urllib.request.urlopen("http://localhost:8000/health").read())
@@ -143,7 +164,7 @@ if ready:
     if "/chat" not in info.get("endpoints", []):
         print("  !! /chat отсутствует — запущен старый код, консультант не заработает")
 else:
-    print("!! backend не поднялся — смотри логи выше")
+    print("!! backend не поднялся за 7 минут. Лог:\n" + open("/tmp/dnai_backend.log", errors="ignore").read()[-2500:])
 
 # ── 2) ПУБЛИЧНАЯ ССЫЛКА НА САЙТ (сразу, до бота) ─────────────────────────────
 from pyngrok import conf, ngrok
