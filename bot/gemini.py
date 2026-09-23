@@ -208,6 +208,10 @@ async def _generate(turns) -> tuple[str, str]:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Gemini через %s не ответил", name)
             errors.append(f"{name}: {_short(exc)}")
+            # 429 = исчерпан лимит проекта: другие пути идут в тот же лимит,
+            # пробовать их бессмысленно — только сожжём ещё запросы
+            if "429" in str(exc) or "quota" in str(exc).lower():
+                break
     raise GeminiError(" | ".join(errors))
 
 
